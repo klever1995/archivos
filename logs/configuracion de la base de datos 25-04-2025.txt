@@ -96,4 +96,9 @@ database: asistentedb
 usuarios: administrador
 contraseña: Mupi2024+11
 url: jdbc:mysql://asistentebase.mysql.database.azure.com:3306/asistentedb
-  
+
+tabla de empresa que se une con loa de logs---------------------------------------------------------------------------------------------
+idEmpresa|nombre              |nombreIndice|estado|fecha_creacion|idEmpresaGen                        |codigo|
+---------+--------------------+------------+------+--------------+------------------------------------+------+
+        1|Mutualista Pichincha|mupi        |ACTIVO|              |1634baff-1919-4e65-832b-15673c705c85|      |
+        2|Demo                |demo        |ACTIVO|              |1634baff                            |      |
