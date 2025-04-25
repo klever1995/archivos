@@ -102,3 +102,183 @@ idEmpresa|nombre              |nombreIndice|estado|fecha_creacion|idEmpresaGen  
 ---------+--------------------+------------+------+--------------+------------------------------------+------+
         1|Mutualista Pichincha|mupi        |ACTIVO|              |1634baff-1919-4e65-832b-15673c705c85|      |
         2|Demo                |demo        |ACTIVO|              |1634baff                            |      |
+
+
+ultimo intento-------------------------------------------------------------------------------------------------------------------------------
+import sys
+from datetime import datetime
+import re
+import os
+from collections import defaultdict
+# Agrega la raíz del proyecto al path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from config import init_app, db 
+from flask import Flask
+from modelo.loLogs import loLogs
+
+# Crear la aplicación Flask
+app = Flask(__name__)
+
+# Inicializar la configuración de la aplicación con la base de datos
+init_app(app)
+
+# === Filtro 1 ===
+def extraer_bloques_log(input_path: str, output_path: str) -> None:
+    with open(input_path, 'r', encoding='utf-8') as file_in, \
+         open(output_path, 'w', encoding='utf-8') as file_out:
+        
+        bloque = []
+        en_bloque = False
+        numero_linea = 0
+        linea_inicio = None
+
+        for linea in file_in:
+            numero_linea += 1
+            if es_inicio_log(linea):
+                if en_bloque:
+                    # Al finalizar un bloque, lo escribimos completo
+                    file_out.write(f"# Bloque encontrado en la línea {linea_inicio}\n")
+                    file_out.write("".join(bloque) + "\n\n")
+                # Comienza un nuevo bloque
+                bloque = [linea]
+                en_bloque = True
+                linea_inicio = numero_linea
+            elif en_bloque:
+                # Continuar agregando al bloque si es parte del stack trace o el error
+                if linea.startswith(("   ", "\t", "at ")):  # Indica un stack trace
+                    bloque.append(linea)
+                else:
+                    # Si encontramos una línea que no es parte del stack trace, terminamos el bloque
+                    file_out.write(f"# Bloque encontrado en la línea {linea_inicio}\n")
+                    file_out.write("".join(bloque) + "\n\n")
+                    en_bloque = False
+                    bloque = []
+
+        # Si quedó un bloque incompleto al final, lo escribimos
+        if en_bloque:
+            file_out.write(f"# Bloque encontrado en la línea {linea_inicio}\n")
+            file_out.write("".join(bloque) + "\n\n")
+
+# === Filtro 2 ===
+def generar_reporte_logs(input_path: str) -> None:
+    reporte = defaultdict(lambda: {
+        'count': 0,
+        'lineas': [],
+        'nivel': '',
+        'categoria': '',
+        'mensaje': ''
+    })
+
+    with open(input_path, 'r', encoding='utf-8') as file:
+        lineas = file.readlines()
+
+        bloque_actual = []
+        for i, linea in enumerate(lineas, 1):
+            match = re.match(r'# Bloque encontrado en la línea (\d+)', linea.strip())
+            if match:
+                # Procesar bloque anterior si existe
+                if bloque_actual:
+                    mensaje_completo = "".join(bloque_actual).strip()
+                    nivel = extraer_nivel(mensaje_completo)
+                    categoria = categorizar_mensaje(mensaje_completo)
+
+                    # Normalizar el mensaje para agrupar (eliminar timestamps, IDs de hilos, etc.)
+                    mensaje_normalizado = re.sub(
+                        r'\d{2}:\d{2}:\d{2},\d{3}.*?\]',  # Elimina timestamp y thread ID
+                        '', 
+                        mensaje_completo
+                    ).strip()
+
+                    # Para FTP MKDIR: Agrupar por acción + directorio (ej: "FTP MKDIR '/tecniseguros'")
+                    if "FTP MKDIR" in mensaje_normalizado:
+                        mensaje_normalizado = re.sub(
+                            r'FTP MKDIR.*?ERROR', 
+                            'FTP MKDIR [DIRECTORIO] ERROR', 
+                            mensaje_normalizado
+                        )
+
+                    clave = (nivel, categoria, mensaje_normalizado)
+                    reporte[clave]['count'] += 1
+                    reporte[clave]['lineas'].append(str(linea_inicio))
+                    reporte[clave]['nivel'] = nivel
+                    reporte[clave]['categoria'] = categoria
+                    reporte[clave]['mensaje'] = mensaje_completo  # Guardamos el original
+
+                # Iniciar nuevo bloque
+                linea_inicio = match.group(1)
+                bloque_actual = []
+            else:
+                # Ignorar líneas que no son parte del mensaje (como metadatos)
+                if not linea.strip().startswith("#"):
+                    bloque_actual.append(linea)
+
+        # Procesar último bloque
+        if bloque_actual:
+            mensaje_completo = "".join(bloque_actual).strip()
+            nivel = extraer_nivel(mensaje_completo)
+            categoria = categorizar_mensaje(mensaje_completo)
+            mensaje_normalizado = re.sub(r'\d{2}:\d{2}:\d{2},\d{3}.*?\]', '', mensaje_completo).strip()
+
+            if "FTP MKDIR" in mensaje_normalizado:
+                mensaje_normalizado = re.sub(
+                    r'FTP MKDIR.*?ERROR', 
+                    'FTP MKDIR [DIRECTORIO] ERROR', 
+                    mensaje_normalizado
+                )
+
+            clave = (nivel, categoria, mensaje_normalizado)
+            reporte[clave]['count'] += 1
+            reporte[clave]['lineas'].append(str(linea_inicio))
+            reporte[clave]['nivel'] = nivel
+            reporte[clave]['categoria'] = categoria
+            reporte[clave]['mensaje'] = mensaje_completo
+
+    # Guardar los resultados en la base de datos
+    with app.app_context():  # Usamos el contexto de la app Flask
+        for (_, _, mensaje_norm), datos in sorted(
+            reporte.items(), 
+            key=lambda x: (prioridad_nivel(x[1]['nivel']), -x[1]['count'])
+        ):
+            # Buscar si ya existe un log similar
+            existing_log = loLogs.query.filter_by(
+                nivel=datos['nivel'],
+                categoria=datos['categoria'],
+                mensaje=datos['mensaje']
+            ).first()
+
+            if existing_log:
+                # Si existe, incrementar la cantidad de ocurrencias
+                existing_log.ocurrencias += datos['count']
+            else:
+                # Si no existe, crear un nuevo registro
+                nuevo_log = loLogs(
+                    nivel=datos['nivel'],
+                    categoria=datos['categoria'],
+                    mensaje=datos['mensaje'],
+                    ocurrencias=datos['count'],
+                    estado='ACTIVO',
+                    fechaCreacion=datetime.now()  # Usa la fecha actual
+                )
+                db.session.add(nuevo_log)
+
+        # Hacer commit a la base de datos
+        db.session.commit()
+
+    print("✅ Reporte guardado exitosamente en la base de datos.")
+
+# ----------------------------
+# Ejecución (Flujo principal)
+# ----------------------------
+if __name__ == "__main__":
+    input_original = "C:/Users/klever.robalino/Desktop/Proyecto-Mutualista/backend-asistente/agentes/logs/logs_files/prueba.txt"
+    output_filtro1 = "C:/Users/klever.robalino/Desktop/Proyecto-Mutualista/backend-asistente/agentes/logs/logs_files/filtro1_bloques.txt"
+
+    # 🔍 Paso 1: Extraer bloques (no solo errores ahora)
+    extraer_bloques_log(input_original, output_filtro1)
+
+    # 📊 Paso 2: Generar reporte agrupado y guardado en la base de datos
+    generar_reporte_logs(output_filtro1)  # Solo pasa el archivo de entrada
+
+    print("✅ Proceso completo: Los logs se han cargado a la base de datos.")
+
