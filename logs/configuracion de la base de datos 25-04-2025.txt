@@ -1,0 +1,99 @@
+configuracion para la base de datos ------------------------------------------------------------------------
+import sys
+import os
+
+# Agrega la raíz del proyecto al path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from config import init_app, db 
+from flask import Flask
+from modelo.loLogs import loLogs  # ✅ Importar la clase, no el módulo
+
+app = Flask(__name__)
+init_app(app)
+
+with app.app_context():
+    try:
+        logs = loLogs.query.all()
+        print("✅ Conexión exitosa. Registros encontrados:", len(logs))
+    except Exception as e:
+        print("❌ Error al consultar la base de datos:", e)
+
+
+configuracion de la creacion de la base de datos -------------------------------------------------------------
+select * from lo_
+
+select * from as_rol
+
+select * from as_empresa
+
+select * from as_perfil
+
+select * from lo_logs
+
+CREATE TABLE lo_logs (
+  idLogAplicacion INT NOT NULL AUTO_INCREMENT,
+  idEmpresa INT NOT NULL,
+  operador INT NOT NULL,
+  fechaCreacion DATETIME NOT NULL,
+  estado VARCHAR(20) DEFAULT 'ACTIVO',
+
+  nivel VARCHAR(10) NOT NULL,
+  componente VARCHAR(255),
+  hilo VARCHAR(100),
+  mensaje TEXT,
+  categoria VARCHAR(100),
+  archivoAfectado TEXT,
+  stackTrace MEDIUMTEXT,        
+  ocurrencias INT DEFAULT 1,
+
+  respuestaOpenai TEXT,
+
+  PRIMARY KEY (idLogAplicacion),
+  FOREIGN KEY (idEmpresa) REFERENCES as_empresa (idEmpresa)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+
+
+
+INSERT into lo_logs (
+  idEmpresa,
+  operador,
+  fechaCreacion,
+  estado,
+  nivel,
+  componente,
+  hilo,
+  mensaje,
+  categoria,
+  archivoAfectado,
+  stackTrace,
+  ocurrencias,
+  respuestaOpenai
+)
+VALUES (
+  1,                                -- idEmpresa (FK)
+  999,                              -- operador (usuario de prueba)
+  NOW(),                            -- fechaCreacion
+  'ACTIVO',                         -- estado
+  'ERROR',                          -- nivel
+  'com.ejemplo.TestServicio',       -- componente
+  'EJB default - 1',                -- hilo
+  'Error al procesar la solicitud', -- mensaje
+  'test_error',                     -- categoria
+  '/ruta/ficticia/archivo.txt',     -- archivoAfectado
+  'java.lang.Exception: Error ficticio de prueba\n\tat com.ejemplo.Test.main(Test.java:10)', -- stackTrace
+  1,                                -- ocurrencias
+  'Sugerencia generada por OpenAI para este error ficticio.' -- respuestaOpenai
+);
+
+
+credenciales---------------------------------------------------------------------------
+  conexion a base: 
+host: asistentebase.mysql.database.azure.com
+database: asistentedb
+usuarios: administrador
+contraseña: Mupi2024+11
+url: jdbc:mysql://asistentebase.mysql.database.azure.com:3306/asistentedb
+  
