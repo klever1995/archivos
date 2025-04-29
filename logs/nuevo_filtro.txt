@@ -1,0 +1,21 @@
+Plan	Precio	Ideal para	Características
+ 	$0 USD	Particulares o equipos pequeños	- Tarjetas ilimitadas
+- Hasta 10 tableros
+- Power-Ups ilimitados por tablero
+- 10 MB/archivo
+- Apps móviles, seguridad básica.
+ 	$5 USD/usuario/mes (anual)	Equipos que gestionan más trabajo	- Todo lo de Free
+- Tableros ilimitados
+- Listas de comprobación avanzadas
+- Campos personalizados
+- 250 MB/archivo
+- 1000 automatizaciones/mes.
+ 	$10 USD/usuario/mes (anual)	Equipos de hasta 100 personas	- Todo lo de Standard
+- Atlassian Intelligence (AI)
+- Vistas: Cronograma, Calendario, Panel, Mapa
+- Comandos ilimitados
+- Funciones avanzadas de administración y exportaciones.
+ 	$17.50 USD/usuario/mes (anual)	Grandes empresas (50+ usuarios)	- Todo lo de Premium
+- Espacios de trabajo ilimitados
+- Seguridad empresarial (SSO, permisos avanzados)
+- Administración completa de usuarios y tableros.
