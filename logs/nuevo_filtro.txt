@@ -1,21 +1,165 @@
-Plan	Precio	Ideal para	Características
- 	$0 USD	Particulares o equipos pequeños	- Tarjetas ilimitadas
-- Hasta 10 tableros
-- Power-Ups ilimitados por tablero
-- 10 MB/archivo
-- Apps móviles, seguridad básica.
- 	$5 USD/usuario/mes (anual)	Equipos que gestionan más trabajo	- Todo lo de Free
-- Tableros ilimitados
-- Listas de comprobación avanzadas
-- Campos personalizados
-- 250 MB/archivo
-- 1000 automatizaciones/mes.
- 	$10 USD/usuario/mes (anual)	Equipos de hasta 100 personas	- Todo lo de Standard
-- Atlassian Intelligence (AI)
-- Vistas: Cronograma, Calendario, Panel, Mapa
-- Comandos ilimitados
-- Funciones avanzadas de administración y exportaciones.
- 	$17.50 USD/usuario/mes (anual)	Grandes empresas (50+ usuarios)	- Todo lo de Premium
-- Espacios de trabajo ilimitados
-- Seguridad empresarial (SSO, permisos avanzados)
-- Administración completa de usuarios y tableros.
+import re
+from collections import defaultdict
+from datetime import datetime
+
+# === Configuraciones ===
+PRIORIDAD = ['ERROR', 'WARN', 'INFO', 'DEBUG', 'UNKNOWN']
+
+CATEGORIAS = {
+    'start_send': re.compile(r'inicia envio', re.IGNORECASE),
+    'end_send': re.compile(r'fin envio', re.IGNORECASE),
+    'ftp_error': re.compile(r'FTP.*ERROR', re.IGNORECASE),
+    'general_error': re.compile(r'ERROR', re.IGNORECASE),
+}
+
+def es_inicio_log(linea: str) -> bool:
+    return bool(re.match(r"\d{2}:\d{2}:\d{2},\d{3}", linea))
+
+def extraer_componente(linea: str) -> str:
+    match = re.search(r'\[([^\]]+)\]', linea)
+    return match.group(1) if match else "desconocido"
+
+def extraer_hilo(linea: str) -> str:
+    match = re.search(r'\[(Thread-\d+|.*?)\]', linea)
+    return match.group(1) if match else "main"
+
+def extraer_archivo_afectado(texto: str) -> str:
+    match = re.search(r"(?:archivo|file|affecting)\s*[:=]\s*'?([^'\n]+)'?", texto, re.IGNORECASE)
+    return match.group(1).strip() if match else "N/A"
+
+def extraer_nivel(linea: str) -> str:
+    niveles = ['ERROR', 'WARN', 'INFO', 'DEBUG']
+    for nivel in niveles:
+        if f' {nivel} ' in linea:
+            return nivel
+    return 'UNKNOWN'
+
+def categorizar_mensaje(texto: str) -> str:
+    for categoria, patron in CATEGORIAS.items():
+        if patron.search(texto):
+            return categoria
+    return 'otros'
+
+def limitar_longitud(texto: str, max_len=30000):
+    return texto if len(texto) <= max_len else texto[:max_len] + '...'
+
+def prioridad_nivel(nivel):
+    return PRIORIDAD.index(nivel) if nivel in PRIORIDAD else len(PRIORIDAD)
+
+# === Filtro 1 ===
+def extraer_bloques_log(input_path: str, output_path: str) -> None:
+    with open(input_path, 'r', encoding='utf-8') as file_in, \
+         open(output_path, 'w', encoding='utf-8') as file_out:
+        
+        bloque = []
+        en_bloque = False
+        numero_linea = 0
+        linea_inicio = None
+
+        for linea in file_in:
+            numero_linea += 1
+            if es_inicio_log(linea):
+                if en_bloque:
+                    file_out.write(f"# Bloque encontrado en la línea {linea_inicio}\n")
+                    file_out.write("".join(bloque) + "\n\n")
+                bloque = [linea]
+                en_bloque = True
+                linea_inicio = numero_linea
+            elif en_bloque:
+                if linea.startswith(("   ", "\t", "at ")):
+                    bloque.append(linea)
+                else:
+                    file_out.write(f"# Bloque encontrado en la línea {linea_inicio}\n")
+                    file_out.write("".join(bloque) + "\n\n")
+                    en_bloque = False
+                    bloque = []
+
+        if en_bloque:
+            file_out.write(f"# Bloque encontrado en la línea {linea_inicio}\n")
+            file_out.write("".join(bloque) + "\n\n")
+
+# === Filtro 2 (Versión Final - Solo muestra error completo) ===
+def generar_reporte_logs(input_path: str, output_path: str) -> None:
+    reporte = defaultdict(lambda: {
+        'count': 0,
+        'lineas': [],
+        'nivel': '',
+        'categoria': '',
+        'componente': '',
+        'hilo': '',
+        'archivoAfectado': '',
+        'stackTrace': '',
+        'mensaje': ''  # Aquí se guardará el error COMPLETO
+    })
+
+    with open(input_path, 'r', encoding='utf-8') as file:
+        lineas = file.readlines()
+
+        bloque_actual = []
+        for i, linea in enumerate(lineas, 1):
+            match = re.match(r'# Bloque encontrado en la línea (\d+)', linea.strip())
+            if match:
+                if bloque_actual:
+                    procesar_bloque(bloque_actual, match.group(1), reporte)
+                bloque_actual = []
+            elif not linea.strip().startswith("#"):
+                bloque_actual.append(linea)
+
+        if bloque_actual:
+            procesar_bloque(bloque_actual, str(len(lineas)), reporte)
+
+    with open(output_path, 'w', encoding='utf-8') as file:
+        for (_, _, _), datos in sorted(
+            reporte.items(), 
+            key=lambda x: (prioridad_nivel(x[1]['nivel']), -x[1]['count'])
+        ):
+            # Mostrar el mensaje COMPLETO en el reporte
+            file.write(f"=== {datos['mensaje']} ===\n")  # Sin limitar_longitud()
+            file.write(f"Nivel: {datos['nivel']} | Categoría: {datos['categoria']}\n")
+            file.write(f"Componente: {datos['componente']} | Hilo: {datos['hilo']}\n")
+            file.write(f"Archivo afectado: {datos['archivoAfectado']}\n")
+            file.write(f"Total: {datos['count']} ocurrencias\n")
+            if datos['stackTrace']:
+                file.write(f"\nStack Trace:\n{datos['stackTrace']}\n")
+            file.write("\nLíneas:\n- " + ", ".join(datos['lineas']) + "\n\n")
+
+def procesar_bloque(bloque_actual, linea_inicio, reporte):
+    mensaje_completo = "".join(bloque_actual).strip()  # Mensaje COMPLETO
+    nivel = extraer_nivel(mensaje_completo)
+    categoria = categorizar_mensaje(mensaje_completo)
+    componente = extraer_componente(mensaje_completo)
+    hilo = extraer_hilo(mensaje_completo)
+    archivo_afectado = extraer_archivo_afectado(mensaje_completo)
+    stack_trace = "\n".join([linea for linea in bloque_actual if linea.startswith(("   ", "\t", "at ", "Caused by:"))])
+
+    mensaje_normalizado = re.sub(r'\d{2}:\d{2}:\d{2},\d{3}.*?\]', '', mensaje_completo).strip()
+    
+    if "FTP MKDIR" in mensaje_normalizado:
+        mensaje_normalizado = re.sub(r'FTP MKDIR.*?ERROR', 'FTP MKDIR [DIRECTORIO] ERROR', mensaje_normalizado)
+
+    clave = (nivel, categoria, mensaje_normalizado)
+    reporte[clave].update({
+        'count': reporte[clave]['count'] + 1,
+        'lineas': reporte[clave]['lineas'] + [linea_inicio],
+        'nivel': nivel,
+        'categoria': categoria,
+        'componente': componente,
+        'hilo': hilo,
+        'archivoAfectado': archivo_afectado,
+        'stackTrace': stack_trace,
+        'mensaje': mensaje_completo  # Guardamos el mensaje COMPLETO
+    })
+# ----------------------------
+# Ejecución (Flujo principal)
+# ----------------------------
+if __name__ == "__main__":
+    input_original = "C:/Users/Klever/Desktop/archivos mutualista/agentes/logs/processed_logs/document_log/server.log"
+    output_filtro1 = "C:/Users/Klever/Desktop/archivos mutualista/agentes/logs/processed_logs/document_log/filtro1_bloques.txt"
+    output_filtro2 = "C:/Users/Klever/Desktop/archivos mutualista/agentes/logs/processed_logs/document_log/filtro2_reporte.txt"
+
+    extraer_bloques_log(input_original, output_filtro1)
+    generar_reporte_logs(output_filtro1, output_filtro2)
+
+    print("✅ Proceso completo:")
+    print(f"- Bloques de log extraídos en: {output_filtro1}")
+    print(f"- Reporte agrupado generado en: {output_filtro2}")
