@@ -1,0 +1,51 @@
+------------Ingresar un registro manualmente------------------------------
+  import sys
+import os
+from datetime import datetime
+
+# Agrega la raíz del proyecto al path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from config import init_app, db
+from flask import Flask
+from modelo.loLogs import loLogs 
+from modelo.asEmpresa import asEmpresa 
+
+# Inicializa la aplicación Flask
+app = Flask(__name__)
+init_app(app)
+
+with app.app_context():
+    try:
+        # ✅ Insertar nuevo registro en la tabla lo_logs
+        nuevo_log = loLogs(
+            idEmpresa=1,
+            operador=101,
+            fechaCreacion=datetime.utcnow(),
+            estado='ACTIVO',
+            nivel='INFO',
+            componente='SistemaDeinformatica',
+            hilo='Thread-1',
+            mensaje='Inicio de sesión exitoso.',
+            categoria='Autenticación',
+            ocurrencias=1,
+            respuestaOpenai=None
+        )
+
+        db.session.add(nuevo_log)
+        db.session.commit()
+        print("✅ Registro insertado correctamente.")
+
+        # 🔍 Consultar todos los registros de lo_logs
+        logs = loLogs.query.all()
+        if logs:
+            print("✅ Registros encontrados:", len(logs))
+            for log in logs:
+                print(f"ID: {log.idLogAplicacion}, IdEmpresa: {log.idEmpresa}, Operador: {log.operador}, "
+                      f"Estado: {log.estado}, Componente: {log.componente}, Mensaje: {log.mensaje}, "
+                      f"Nivel: {log.nivel}, Fecha: {log.fechaCreacion}")
+        else:
+            print("❌ No se encontraron registros en la base de datos.")
+
+    except Exception as e:
+        print("❌ Error al interactuar con la base de datos:", e)
