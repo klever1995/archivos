@@ -213,6 +213,61 @@ if __name__ == "__main__":
     print(f"- Reporte agrupado generado en: {output_filtro2}")
 
 
+--------------------metodo que sube los datos a la base----------------------------------------
+import sys
+import os
+from flask import Flask
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from config import init_app, db 
+from modelo.loLogs import loLogs
+from datetime import datetime
+from modelo.asEmpresa import asEmpresa
+
+
+app = Flask(__name__)
+init_app(app)
+
+class Logger:
+    @staticmethod
+    def insertar_log(**kwargs):
+        with app.app_context():
+            try:
+                nuevo_log = loLogs(
+                    idEmpresa=kwargs.get('idEmpresa'),
+                    operador=kwargs.get('operador'),
+                    fechaCreacion=datetime.utcnow(),
+                    estado=kwargs.get('estado', 'ACTIVO'),
+                    nivel=kwargs.get('nivel', 'INFO'),
+                    componente=kwargs.get('componente', 'SistemaGeneral'),
+                    hilo=kwargs.get('hilo', 'MainThread'),
+                    mensaje=kwargs.get('mensaje'),
+                    categoria=kwargs.get('categoria', 'General'),
+                    ocurrencias=kwargs.get('ocurrencias', 1),
+                    respuestaOpenai=kwargs.get('respuestaOpenai'),
+                    lineas=kwargs.get('lineas')
+                )
+                db.session.add(nuevo_log)
+                db.session.commit()
+                print("✅ Log insertado correctamente.")
+                return True
+            except Exception as e:
+                db.session.rollback()
+                print(f"❌ Error al insertar log: {e}")
+                return False
+
+--------------------------ejemplo de uso del metodo---------------------------------------
+from insertar import Logger
+
+Logger.insertar_log(
+    idEmpresa=1,
+    operador=101,
+    mensaje="Inicio de varias sesiones.",
+    componente="SistemaDeinformática",
+    categoria="Autenticación",
+    lineas=["Línea 1: Sesión iniciada", "Línea 2: Usuario autenticado"]
+)
+
 
 --------------filtro final subido a la base de datos--------------------------
 import re
