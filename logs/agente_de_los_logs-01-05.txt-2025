@@ -2,6 +2,7 @@
 # En cualquier archivo de tu proyecto
 import os
 import sys
+os.environ['NO_PROXY'] = 'recursoazureopenaimupi.openai.azure.com'
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from consumos.consulta_ia_openai import Consulta_ia_openai
