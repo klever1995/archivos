@@ -56,3 +56,25 @@ print(respuesta)
         except Exception as e:
             logging.error(f"Error en respuesta_rapida: {e}")
             return f"Error al procesar la solicitud: {e}"
+
+
+-------------------esta es la de los logs-------------------------------
+# En cualquier archivo de tu proyecto
+import os
+import sys
+os.environ['NO_PROXY'] = 'recursoazureopenaimupi.openai.azure.com'
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from consumos.consulta_ia_openai import Consulta_ia_openai
+
+# Crear instancia (ya tiene la API key configurada internamente)
+consulta = Consulta_ia_openai()
+
+# Ejemplo de uso con logs reales
+log_error = """
+2023-11-15 14:30:22 [ERROR] [nginx] 502 Bad Gateway
+upstream prematurely closed connection while reading response header
+"""
+
+respuesta = consulta.interpretar_logs(log_error)
+print(respuesta)
