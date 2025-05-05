@@ -1,0 +1,23 @@
+------------------------codigo de dbeaver-----------------------tabla lo_procesos
+
+select * from lo_logs
+select * from lo_procesos
+
+
+TRUNCATE TABLE lo_logs;
+
+TRUNCATE TABLE lo_procesos;
+
+
+CREATE TABLE lo_procesos (
+    idAuditoria INT PRIMARY KEY AUTO_INCREMENT,
+    idEmpresa INT NOT NULL,
+    operador INT NOT NULL,
+    fechaInicio DATETIME NOT NULL,
+    fechaFin DATETIME,
+    duracionSegundos FLOAT GENERATED ALWAYS AS (
+        TIMESTAMPDIFF(SECOND, fechaInicio, fechaFin)
+    ) STORED,
+    totalLogsProcesados INT DEFAULT 0,
+    FOREIGN KEY (idEmpresa) REFERENCES as_empresa(idEmpresa)
+);
