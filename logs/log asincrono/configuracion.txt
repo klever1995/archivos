@@ -1,0 +1,47 @@
+----------------------configuracion base de datos-----------------script de la base de datos-----
+select * from lo_logs
+select * from lo_procesos
+
+
+TRUNCATE TABLE lo_logs;
+
+TRUNCATE TABLE lo_procesos;
+
+CREATE TABLE lo_logs (
+  idLogAplicacion INT NOT NULL AUTO_INCREMENT,
+  idEmpresa INT NOT NULL,
+  operador INT NOT NULL,
+  fechaCreacion DATETIME NOT NULL,
+  estado VARCHAR(20) DEFAULT 'ACTIVO',
+
+  nivel VARCHAR(10) NOT NULL,
+  componente VARCHAR(255),
+  hilo VARCHAR(100),
+  mensaje TEXT,
+  categoria VARCHAR(100),
+  ocurrencias INT DEFAULT 1,
+  respuestaOpenai TEXT,
+
+  PRIMARY KEY (idLogAplicacion),
+  FOREIGN KEY (idEmpresa) REFERENCES as_empresa (idEmpresa)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+CREATE TABLE lo_procesos (
+    idAuditoria INT PRIMARY KEY AUTO_INCREMENT,
+    idEmpresa INT NOT NULL,
+    operador INT NOT NULL,
+    fechaInicio DATETIME NOT NULL,
+    fechaFin DATETIME,
+    duracionSegundos FLOAT GENERATED ALWAYS AS (
+        TIMESTAMPDIFF(SECOND, fechaInicio, fechaFin)
+    ) STORED,
+    totalLogsProcesados INT DEFAULT 0,
+    FOREIGN KEY (idEmpresa) REFERENCES as_empresa(idEmpresa)
+);
+
+
+
+ALTER TABLE lo_procesos
+ADD COLUMN lineaInicio INT DEFAULT 1,
+ADD COLUMN lineaFin INT DEFAULT NULL;
