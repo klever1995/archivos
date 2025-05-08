@@ -1,0 +1,484 @@
+----------------------------------------------loProcesos.py-----------------------------------
+from config import db
+from datetime import datetime
+
+class LoProcesos(db.Model):
+    __tablename__ = 'LO_PROCESOS'
+    
+    idAuditoria = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    idEmpresa = db.Column(db.Integer, db.ForeignKey('AS_EMPRESA.idEmpresa'), nullable=False)
+    operador = db.Column(db.Integer, nullable=False)
+    fechaInicio = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    fechaFin = db.Column(db.DateTime, nullable=True)
+    totalLogsProcesados = db.Column(db.Integer, default=0, nullable=False)
+    lineaInicio = db.Column(db.Integer, default=1, nullable=False) 
+    lineaFin = db.Column(db.Integer, nullable=True) 
+    ultimo_byte_procesado = db.Column(db.BigInteger, default=0, nullable=False)
+    ultimo_byte_reservado = db.Column(db.BigInteger, nullable=True)
+    checksum_archivo = db.Column(db.String(64), nullable=True)
+    estado = db.Column(db.String(20), default='PENDIENTE')  
+    fecha_modificacion = db.Column(db.DateTime)
+    
+    empresa = db.relationship('asEmpresa', backref='procesos')
+    
+    @property
+    def duracionSegundos(self):
+        if self.fechaFin and self.fechaInicio:
+            return (self.fechaFin - self.fechaInicio).total_seconds()
+        return None
+
+    def reservar_chunk(self, chunk_size):
+        """Reserva un nuevo chunk para procesamiento"""
+        if self.ultimo_byte_reservado is not None:
+            raise ValueError("Ya existe un chunk reservado")
+        
+        self.ultimo_byte_reservado = self.ultimo_byte_procesado + chunk_size
+        return (self.ultimo_byte_procesado, self.ultimo_byte_reservado)
+
+    def confirmar_chunk(self, exito=True):
+        """Confirma el procesamiento del chunk actual"""
+        if exito:
+            self.ultimo_byte_procesado = self.ultimo_byte_reservado
+        self.ultimo_byte_reservado = None
+
+
+
+-----------------------------metodos_loprocesos.py-------------------------------------
+          import sys
+import os
+import hashlib
+from flask import Flask
+from datetime import datetime, timedelta
+from contextlib import contextmanager
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from config import init_app, db 
+from modelo.loProcesos import LoProcesos
+from modelo.asEmpresa import asEmpresa
+
+app = Flask(__name__)
+init_app(app)
+
+# Configuración de chunks
+CHUNK_SIZE = 1024 * 1024  # 1MB por defecto
+TIMEOUT_MINUTOS = 30  # Para chunks huérfanos
+
+@contextmanager
+def db_session():
+    """Manejador de contexto para sesiones de BD"""
+    try:
+        yield db.session
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        raise e
+
+class ProcesosLogger:
+    
+    @staticmethod
+    def calcular_checksum(ruta_archivo: str) -> str:
+        """Calcula hash SHA-256 del archivo para identificación única"""
+        try:
+            with open(ruta_archivo, 'rb') as f:
+                return hashlib.sha256(f.read()).hexdigest()
+        except Exception as e:
+            print(f"❌ Error calculando checksum: {e}")
+            return None
+
+    @staticmethod
+    def iniciar_proceso(idEmpresa: int, operador: int, ruta_archivo: str = None) -> int:
+
+        with db_session() as session:
+            try:
+                checksum = ProcesosLogger.calcular_checksum(ruta_archivo) if ruta_archivo else None
+                
+                nuevo_proceso = LoProcesos(
+                    idEmpresa=idEmpresa,
+                    operador=operador,
+                    fechaInicio=datetime.now(),
+                    checksum_archivo=checksum,
+                    ultimo_byte_procesado=0,
+                    estado='INICIADO'
+                )
+                
+                session.add(nuevo_proceso)
+                print(f"✅ Proceso {nuevo_proceso.idAuditoria} iniciado. Checksum: {checksum}")
+                return nuevo_proceso.idAuditoria
+                
+            except Exception as e:
+                print(f"❌ Error al iniciar proceso: {e}")
+                return -1
+
+    @staticmethod
+    def reservar_chunk(id_proceso: int, ruta_archivo: str) -> tuple:
+
+        with db_session() as session:
+            try:
+                proceso = session.query(LoProcesos).get(id_proceso)
+                if not proceso:
+                    raise ValueError(f"Proceso {id_proceso} no existe")
+                
+                if proceso.ultimo_byte_reservado:
+                    raise ValueError("Ya existe un chunk reservado")
+                
+                file_size = os.path.getsize(ruta_archivo)
+                if proceso.ultimo_byte_procesado >= file_size:
+                    return None  # Archivo ya procesado completamente
+                
+                chunk_end = min(
+                    proceso.ultimo_byte_procesado + CHUNK_SIZE,
+                    file_size
+                )
+                
+                proceso.ultimo_byte_reservado = chunk_end
+                proceso.fecha_modificacion = datetime.now()
+                proceso.estado = 'PROCESANDO'
+                
+                print(f"📌 Chunk reservado: bytes {proceso.ultimo_byte_procesado}-{chunk_end}")
+                return (proceso.ultimo_byte_procesado, chunk_end)
+                
+            except Exception as e:
+                print(f"❌ Error reservando chunk: {e}")
+                raise
+
+    @staticmethod
+    def finalizar_chunk(id_proceso: int, exito: bool, logs_procesados: int = 0) -> bool:
+
+        with db_session() as session:
+            try:
+                proceso = session.query(LoProcesos).get(id_proceso)
+                if not proceso:
+                    raise ValueError(f"Proceso {id_proceso} no existe")
+                
+                if exito:
+                    proceso.ultimo_byte_procesado = proceso.ultimo_byte_reservado
+                    proceso.totalLogsProcesados += logs_procesados
+                    proceso.estado = 'COMPLETADO' if proceso.ultimo_byte_procesado >= os.path.getsize(ruta_archivo) else 'PENDIENTE'
+                else:
+                    proceso.estado = 'FALLIDO'
+                
+                proceso.ultimo_byte_reservado = None
+                proceso.fecha_modificacion = datetime.now()
+                
+                print(f"🔚 Chunk finalizado {'exitosamente' if exito else 'con fallos'}")
+                return True
+                
+            except Exception as e:
+                print(f"❌ Error finalizando chunk: {e}")
+                raise
+
+    @staticmethod
+    def recuperar_chunks_huérfanos():
+        """
+        Libera chunks que llevan más de TIMEOUT_MINUTOS en estado 'PROCESANDO'.
+        """
+        with db_session() as session:
+            try:
+                limite = datetime.now() - timedelta(minutes=TIMEOUT_MINUTOS)
+                huérfanos = session.query(LoProcesos).filter(
+                    LoProcesos.estado == 'PROCESANDO',
+                    LoProcesos.fecha_modificacion < limite
+                ).all()
+                
+                for proc in huérfanos:
+                    proc.ultimo_byte_reservado = None
+                    proc.estado = 'FALLIDO'
+                    print(f"♻️ Liberando chunk huérfano en proceso {proc.idAuditoria}")
+                
+                return len(huérfanos)
+            except Exception as e:
+                print(f"❌ Error recuperando chunks huérfanos: {e}")
+                return 0
+
+    @staticmethod
+    def finalizar_proceso(id_proceso: int) -> bool:
+        """
+        Marca un proceso como completamente finalizado.
+        """
+        with db_session() as session:
+            try:
+                proceso = session.query(LoProcesos).get(id_proceso)
+                if proceso:
+                    proceso.fechaFin = datetime.now()
+                    proceso.estado = 'FINALIZADO'
+                    print(f"🏁 Proceso {id_proceso} finalizado")
+                    return True
+                return False
+            except Exception as e:
+                print(f"❌ Error finalizando proceso: {e}")
+                return False
+
+    @staticmethod
+    def obtener_duracion_proceso(id_proceso: int) -> float:
+        """Obtiene la duración en segundos de un proceso completado"""
+        with app.app_context():
+            proceso = LoProcesos.query.get(id_proceso)
+            if proceso and proceso.fechaFin:
+                return (proceso.fechaFin - proceso.fechaInicio).total_seconds()
+            return None
+
+
+--------------------------------------------------------------------------------ejecucion final pero que no funciona---------------------------
+import os
+import sys
+import re
+from collections import defaultdict
+from insertar import Logger
+from metodos_loprocesos import ProcesosLogger
+from flask import Flask
+from config import init_app, db
+
+#Configuración inicial y conexión con OpenAI
+os.environ['NO_PROXY'] = 'recursoazureopenaimupi.openai.azure.com'
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+from consumos.consulta_ia_openai import Consulta_ia_openai
+
+app = Flask(__name__)
+CHUNK_SIZE = 1024 * 1024
+
+# === Configuraciones ===
+
+# Prioridades y categorías para clasificación de logs
+PRIORIDAD = ['ERROR', 'WARN', 'INFO', 'DEBUG', 'UNKNOWN']
+
+CATEGORIAS = {
+    'start_send': re.compile(r'inicia envio', re.IGNORECASE),
+    'end_send': re.compile(r'fin envio', re.IGNORECASE),
+    'ftp_error': re.compile(r'FTP.*ERROR', re.IGNORECASE),
+    'general_error': re.compile(r'ERROR', re.IGNORECASE),
+}
+
+# Métodos básicos para procesamiento de logs
+def es_inicio_log(linea: str) -> bool:
+    return bool(re.match(r"\d{2}:\d{2}:\d{2},\d{3}", linea))
+
+#Método que extrae el componente/servicio del mensaje de log
+def extraer_componente(linea: str) -> str:
+    match = re.search(r'\b(?:ERROR|WARN|INFO|DEBUG)\s+\[([^\]]+)\]', linea)
+    return match.group(1).strip() if match else "desconocido"
+
+#Extrae el nombre del hilo de ejecución
+def extraer_hilo(linea: str) -> str:
+    match = re.search(r'\(([^)]+)\)', linea)
+    return match.group(1).strip() if match else "main"
+
+#Identifica el nivel del log
+def extraer_nivel(linea: str) -> str:
+    niveles = ['ERROR', 'WARN', 'INFO', 'DEBUG']
+    for nivel in niveles:
+        if f' {nivel} ' in linea:
+            return nivel
+    return 'UNKNOWN'
+
+#Clasifica el mensaje según las categorías predefinidas
+def categorizar_mensaje(texto: str) -> str:
+    for categoria, patron in CATEGORIAS.items():
+        if patron.search(texto):
+            return categoria
+    return 'otros'
+
+#Recorta textos muy largos
+def limitar_longitud(texto: str, max_len=30000):
+    return texto if len(texto) <= max_len else texto[:max_len] + '...'
+
+#Devuelve prioridad numérica para ordenar logs
+def prioridad_nivel(nivel):
+    return PRIORIDAD.index(nivel) if nivel in PRIORIDAD else len(PRIORIDAD)
+
+#Contar bloques de log en archivo procesado
+def contar_logs_procesados(file_path: str) -> int:
+    """Cuenta la cantidad de bloques de log procesados"""
+    with open(file_path, 'r', encoding='utf-8') as file:
+        return sum(1 for line in file if line.startswith('# Bloque encontrado'))
+
+# === Filtro 1 (Extracción de bloques de log)===
+def extraer_bloques_log(input_path: str, id_proceso: int) -> list:
+    """
+    Nueva versión que procesa por chunks usando bytes
+    """
+    bloques = []
+    proceso = ProcesosLogger.obtener_proceso(id_proceso)
+    
+    if not proceso or proceso.ultimo_byte_procesado >= os.path.getsize(input_path):
+        return []
+
+    # Reservar chunk
+    chunk_range = ProcesosLogger.reservar_chunk(id_proceso, input_path)
+    if not chunk_range:
+        return []
+    
+    byte_inicio, byte_fin = chunk_range
+
+    # Procesar chunk
+    with open(input_path, 'rb') as file:
+        file.seek(byte_inicio)
+        data = file.read(byte_fin - byte_inicio).decode('utf-8', errors='ignore')
+        
+        bloque_actual = []
+        en_bloque = False
+        posicion_inicio = None
+        
+        for linea in data.splitlines(keepends=True):
+            if es_inicio_log(linea):
+                if en_bloque and bloque_actual:
+                    bloques.append({
+                        'contenido': ''.join(bloque_actual),
+                        'inicio': posicion_inicio
+                    })
+                bloque_actual = [linea]
+                en_bloque = True
+                posicion_inicio = byte_inicio
+            elif en_bloque:
+                bloque_actual.append(linea)
+            
+            byte_inicio += len(linea.encode('utf-8'))
+
+        if en_bloque and bloque_actual:
+            bloques.append({
+                'contenido': ''.join(bloque_actual),
+                'inicio': posicion_inicio
+            })
+
+    return bloques
+
+def procesar_archivo_completo(input_path: str):
+    """Flujo completo con gestión por chunks"""
+    with app.app_context():
+        # Recuperar procesos huérfanos primero
+        ProcesosLogger.recuperar_chunks_huérfanos()
+        
+        id_proceso = ProcesosLogger.iniciar_proceso(
+            idEmpresa=1,
+            operador=0,
+            ruta_archivo=input_path
+        )
+
+        if id_proceso == -1:
+            print("❌ No se pudo iniciar el proceso")
+            return
+
+        try:
+            while True:
+                try:
+                    bloques = extraer_bloques_log(input_path, id_proceso)
+                    if not bloques:
+                        break  # Terminó el archivo
+
+                    reporte = generar_reporte_logs(bloques)
+                    total_logs = len(bloques)
+                    
+                    ProcesosLogger.finalizar_chunk(
+                        id_proceso=id_proceso,
+                        exito=True,
+                        logs_procesados=total_logs
+                    )
+                    
+                    print(f"✅ Chunk procesado: {total_logs} logs")
+                    
+                except Exception as chunk_error:
+                    print(f"❌ Error en chunk: {str(chunk_error)}")
+                    ProcesosLogger.finalizar_chunk(id_proceso, exito=False)
+                    continue
+                    
+        finally:
+            ProcesosLogger.finalizar_proceso(id_proceso)
+            print("🏁 Proceso finalizado")
+
+# === Filtro 2 (Generación de reporte)===
+def generar_reporte_logs(bloques: list) -> dict:
+    reporte = defaultdict(lambda: {
+        'count': 0,
+        'lineas': [],
+        'nivel': '',
+        'categoria': '',
+        'componente': '',
+        'hilo': '',
+        'mensaje': '',
+        'mensaje_normalizado': ''
+    })
+
+    
+    for bloque in bloques:
+        
+        lineas_bloque = bloque['contenido'].split('\n')
+        procesar_bloque(lineas_bloque, str(bloque['linea_inicio']), reporte)
+
+    insertar_logs_a_bd(reporte)
+    return reporte  
+
+#Guardar los logs procesados y el proceso en la base de datos
+def insertar_logs_a_bd(reporte):
+    total_insertados = 0
+    consulta = Consulta_ia_openai()
+    
+    for (nivel, categoria, _), datos in reporte.items():
+        try:
+            # Verificar si el log ya existe (para TODOS los niveles)
+            if not Logger.existe_error_en_bd(datos['mensaje_normalizado'], nivel):
+                respuesta_openai = None
+                
+                # Solo consultar OpenAI para errores
+                if nivel == 'ERROR':
+                    respuesta_openai = consulta.interpretar_logs(datos['mensaje_normalizado'])
+                    print(f"🔍 Solución OpenAI para error: {respuesta_openai[:100]}...")
+                
+                # Insertar el log (todos los niveles)
+                Logger.insertar_log(
+                    idEmpresa=1,
+                    operador=0,
+                    mensaje=limitar_longitud(datos['mensaje_normalizado']),
+                    nivel=nivel,
+                    componente=datos['componente'],
+                    hilo=datos['hilo'],
+                    categoria=categoria,
+                    estado='ACTIVO',
+                    lineas=datos['lineas'],
+                    ocurrencias=datos['count'],
+                    respuestaOpenai=respuesta_openai
+                )
+                total_insertados += 1
+                print(f"✅ Log insertado: {nivel} - {datos['mensaje_normalizado'][:100]}...")
+            else:
+                print(f"⚠️ Log duplicado (no insertado): {nivel} - {datos['mensaje_normalizado'][:100]}...")
+                
+        except Exception as e:
+            print(f"❌ Error insertando log: {str(e)}")
+    
+    return total_insertados
+
+#Analizar un bloque de log y actualizar el reporte
+def procesar_bloque(bloque_actual, linea_inicio, reporte):
+    mensaje_completo = "".join(bloque_actual).strip()
+    nivel = extraer_nivel(mensaje_completo)
+    categoria = categorizar_mensaje(mensaje_completo)
+    componente = extraer_componente(mensaje_completo)
+    hilo = extraer_hilo(mensaje_completo)
+
+    mensaje_normalizado = re.sub(r'^\d{2}:\d{2}:\d{2},\d{3}\s*', '', mensaje_completo).strip()
+
+    if "FTP MKDIR" in mensaje_normalizado:
+        mensaje_normalizado = re.sub(r'FTP MKDIR.*?ERROR', 'FTP MKDIR [DIRECTORIO] ERROR', mensaje_normalizado)
+
+    clave = (nivel, categoria, mensaje_normalizado)
+    reporte[clave].update({
+        'count': reporte[clave]['count'] + 1,
+        'lineas': reporte[clave]['lineas'] + [linea_inicio],
+        'nivel': nivel,
+        'categoria': categoria,
+        'componente': componente,
+        'hilo': hilo,
+        'mensaje': mensaje_completo,
+        'mensaje_normalizado': mensaje_normalizado 
+    })
+
+# ----------------------------
+# Ejecución (Flujo principal)
+# ----------------------------
+if __name__ == "__main__":
+    # Configuración de la app Flask
+    from config import init_app
+    init_app(app)
+    
+    # Procesar archivo
+    input_file = "C:/Users/klever.robalino/Desktop/Proyecto-Mutualista/backend-asistente/agentes/logs/logs_files/prueba2.txt"
+    procesar_archivo_completo(input_file)
