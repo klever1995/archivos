@@ -118,18 +118,15 @@ Con esto ya tendrías un MVP útil. ¿Quieres profundizar en alguna parte en esp
 
 
 -------------------estructura de la carpeta del front----------------
-quí tienes una estructura de carpetas modular y lista para integración futura, organizada por funcionalidad:
-
-📦 logs_frontend/
-├── 📂 assets/
-│   ├── 📂 css/
-│   │   └── styles.css    # Estilos específicos del módulo
-│   └── 📂 js/
-│       └── main.js       # Lógica de frontend (API calls, etc.)
-├── 📂 components/        # Componentes reutilizables
-│   ├── LogViewer.vue     # (o .jsx) Visualizador de logs
-│   └── UploadModal.vue   # Modal para subir archivos
-├── 📂 pages/
-│   └── LogDashboard.html # Página principal del módulo
-├── 📜 index.html         # Entrada principal (simula menú)
-└── 📜 config.json        # URLs de API (para desarrollo)
+📦 src/
+├── 📂 logs/                  # Carpeta modular de logs
+│   ├── 📂 components/        # Componentes específicos
+│   │   ├── LogViewer.vue     # Visualizador
+│   │   └── Uploader.vue      # Subida de archivos  
+│   ├── 📂 services/
+│   │   └── api.js            # Llamadas a tu endpoint FastAPI
+│   ├── 📂 assets/
+│   │   └── logs.css          # Estilos específicos
+│   └── LogsPage.vue          # Página principal del módulo
+└── 📂 views/                 # (O donde estén tus páginas)
+    └── LogsView.vue          # Ruta integrada al menú principal
