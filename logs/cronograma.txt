@@ -1,0 +1,12 @@
+15-05-2025 Instalación de herramientas para la ejecución del frontend de la aplicación, configuración de versión compatible de Node.js y restauración de imagen del sistema por fallas en el equipo.
+
+13-05-2025 Presentación de avances del filtro de logs, revisión de observaciones y ajustes solicitados. Se recibió acceso al frontend del proyecto y se indicaron los lineamientos visuales para el diseño de la aplicación.
+
+09-05-2025 Presentación de avances del filtro de logs con interpretación de OpenAI y guardado en base de datos. Se implementó el procesamiento asíncrono y el registro del byte de avance para permitir reanudación en ejecuciones simultáneas.
+
+08-05-2025 Creación de estructura para registrar y controlar procesos de logs, con soporte para procesamiento por bloques, control de estado y seguimiento de progreso. Se integró la lógica en el código para su uso en auditoría.
+
+06-05-2025 Creación de estructura para almacenar registros de logs en base de datos, incluyendo campos para detalles técnicos y respuesta de OpenAI. Se implementó toda la lógica correspondiente en el programa.
+
+01-05-2025 Integración del modelo de OpenAI al filtro de logs para generar respuestas automáticas sobre errores detectados. Se completó la lógica de interpretación y se almacenaron los resultados en archivos .txt como salida inicial.
+
