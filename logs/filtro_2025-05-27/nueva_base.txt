@@ -1,0 +1,19 @@
+class ArchivoLog(db.Model):
+    __tablename__ = 'ARCHIVOS_LOG'
+    
+    id_archivo = db.Column(db.Integer, primary_key=True)
+    ruta = db.Column(db.String(500), unique=True)  # Ej: '/var/log/servidorA/app.log'
+    nombre_servidor = db.Column(db.String(100))    # Ej: 'servidorA'
+    alias = db.Column(db.String(100))             # Nombre amigable (opcional)
+    activo = db.Column(db.Boolean, default=True)
+    fecha_registro = db.Column(db.DateTime, default=datetime.now)
+
+
+
+# En LO_LOGS (errores):
+id_archivo = db.Column(db.Integer, db.ForeignKey('ARCHIVOS_LOG.id_archivo'))
+archivo = db.relationship('ArchivoLog', backref='errores')
+
+# En LO_PROCESOS (procesos):
+id_archivo = db.Column(db.Integer, db.ForeignKey('ARCHIVOS_LOG.id_archivo'))
+archivo_rel = db.relationship('ArchivoLog', backref='procesos')
