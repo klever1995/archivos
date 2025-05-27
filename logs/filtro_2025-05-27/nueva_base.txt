@@ -17,3 +17,56 @@ archivo = db.relationship('ArchivoLog', backref='errores')
 # En LO_PROCESOS (procesos):
 id_archivo = db.Column(db.Integer, db.ForeignKey('ARCHIVOS_LOG.id_archivo'))
 archivo_rel = db.relationship('ArchivoLog', backref='procesos')
+
+
+
+
+
+🛠 Solución Directa (2 cambios clave):
+1. Elimina el bloqueo de la tabla:
+
+Modifica reservar_bloque en metodos_loprocesos.py:
+python
+
+# Cambia esto:
+ultimo_proceso = db.session.query(LoProcesos).filter(
+    LoProcesos.archivo == ruta_archivo,
+    LoProcesos.estado.in_(['COMPLETADO', 'PROCESANDO'])
+).order_by(LoProcesos.byte_fin.desc()).with_for_update().first()  # ⚠️ Elimina with_for_update()
+
+# Por esto:
+ultimo_proceso = db.session.query(LoProcesos).filter(
+    LoProcesos.archivo == ruta_archivo,
+    LoProcesos.estado.in_(['COMPLETADO', 'PROCESANDO'])
+).order_by(LoProcesos.byte_fin.desc()).first()  # ✅ Sin bloqueo
+
+2. Usa sesiones independientes por hilo:
+
+En tu endpoint FastAPI (procesar-log), asegúrate de que cada hilo tenga su propia sesión:
+python
+
+@app.post("/procesar-log/")
+async def procesar_log(nombre_archivo: str = Form(...)):
+    from config import db  # Importa dentro de la función
+    RUTA_BASE_LOGS = "C:/Users/klever.robalino/Downloads/"
+    ruta_completa = os.path.join(RUTA_BASE_LOGS, nombre_archivo)
+    
+    try:
+        # Crea una nueva sesión para este hilo
+        with db.begin() as session:  # ✅ Sesión aislada
+            bloque = ProcesosLogger.reservar_bloque(
+                ruta_archivo=ruta_completa, 
+                idEmpresa=1,
+                operador=0,
+                bloque_size=1048576
+            )
+            # ... (resto del código)
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+✅ Resultado Esperado:
+
+    Procesamiento verdadero en paralelo: Cada archivo se procesará simultáneamente sin bloqueos.
+
+    Consistencia garantizada: El campo byte_fin se calculará correctamente para cada archivo (no hay solapamiento porque cada hilo trabaja en un archivo distinto).
