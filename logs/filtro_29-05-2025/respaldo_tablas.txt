@@ -1,0 +1,42 @@
+CREATE TABLE `lo_procesos` (
+  `idAuditoria` int NOT NULL AUTO_INCREMENT,
+  `idEmpresa` int NOT NULL,
+  `operador` int NOT NULL,
+  `fechaInicio` datetime NOT NULL,
+  `fechaFin` datetime DEFAULT NULL,
+  `duracionSegundos` float GENERATED ALWAYS AS (timestampdiff(SECOND,`fechaInicio`,`fechaFin`)) STORED,
+  `totalLogsProcesados` int DEFAULT '0',
+  `byte_inicio` bigint DEFAULT '0',
+  `byte_fin` bigint DEFAULT NULL,
+  `ultimo_byte_procesado` bigint DEFAULT NULL,
+  `archivo` varchar(255) DEFAULT NULL COMMENT 'Ruta absoluta del archivo de log',
+  `checksum` varchar(64) DEFAULT NULL COMMENT 'SHA-256 del archivo para detectar cambios',
+  `bloque_size` int DEFAULT '1048576' COMMENT 'Tamaño del chunk en bytes (1MB por defecto)',
+  `estado` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`idAuditoria`),
+  KEY `idEmpresa` (`idEmpresa`),
+  CONSTRAINT `lo_procesos_ibfk_1` FOREIGN KEY (`idEmpresa`) REFERENCES `as_empresa` (`idEmpresa`)
+) ENGINE=InnoDB AUTO_INCREMENT=65 DEFAULT CHARSET=utf8mb3
+
+
+
+
+
+CREATE TABLE `lo_logs` (
+  `idLogAplicacion` int NOT NULL AUTO_INCREMENT,
+  `idEmpresa` int NOT NULL,
+  `operador` int NOT NULL,
+  `fechaCreacion` datetime NOT NULL,
+  `estado` varchar(20) DEFAULT 'ACTIVO',
+  `nivel` varchar(10) NOT NULL,
+  `componente` varchar(255) DEFAULT NULL,
+  `hilo` varchar(100) DEFAULT NULL,
+  `mensaje` text,
+  `categoria` varchar(100) DEFAULT NULL,
+  `ocurrencias` int DEFAULT '1',
+  `respuestaOpenai` text,
+  `lineas` json DEFAULT NULL,
+  PRIMARY KEY (`idLogAplicacion`),
+  KEY `idEmpresa` (`idEmpresa`),
+  CONSTRAINT `lo_logs_ibfk_1` FOREIGN KEY (`idEmpresa`) REFERENCES `as_empresa` (`idEmpresa`)
+) ENGINE=InnoDB AUTO_INCREMENT=32 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
