@@ -265,3 +265,77 @@ const MultiLogProcessor = () => {
 };
 
 export default MultiLogProcessor;
+
+      <div className="lista-archivos">
+        {servidores.length === 0 ? (
+          <p>No hay servidores registrados</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Servidor</th>
+                <th>Intervalo (min)</th>
+                <th>Estado</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              {servidores.map((servidor) => (
+                <tr key={servidor.idServidor}>
+                  <td>{servidor.ruta}</td>
+                  <td>
+                    <input
+                      type="number"
+                      min="1"
+                      value={servidor.intervalo}
+                      onChange={(e) => {
+                        const intervalo = Math.max(1, e.target.valueAsNumber || 5);
+                        setServidores(prev => prev.map(s => 
+                          s.idServidor === servidor.idServidor ? { ...s, intervalo } : s
+                        ));
+                      }}
+                    />
+                  </td>
+                  <td>
+                    <span className={`estado ${servidor.activo ? 'activo' : ''}`}>
+                      {servidor.activo ? '▶ MONITOREANDO' : '⏸ DETENIDO'}
+                    </span>
+                  </td>
+                  <td>
+                    <button
+                      onClick={() => toggleProcesamiento(
+                        servidor.idServidor,
+                        servidor.ruta,
+                        servidor.intervalo
+                      )}
+                      className={servidor.activo ? 'detener' : 'iniciar'}
+                    >
+                      {servidor.activo ? 'Detener' : 'Iniciar'}
+                    </button>
+                    <button
+                    onClick={() => eliminarServidor(servidor.idServidor)}
+                    className="eliminar"
+                    title="Eliminar servidor"
+                    disabled={eliminando === servidor.idServidor}
+                  >
+                    {eliminando === servidor.idServidor ? 'Eliminando...' : '🗑️ Eliminar'}
+                  </button>
+                  </td>
+                  
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {error && (
+        <div className="error" onClick={() => setError(null)}>
+          ❌ {error}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default MultiLogProcessor;
