@@ -1,0 +1,141 @@
+import React, { useState, useEffect } from 'react';
+import { Doughnut } from 'react-chartjs-2';
+import { Chart, registerables } from 'chart.js';
+import './TableroLogs.css';
+
+Chart.register(...registerables);
+
+const TableroLogs = () => {
+  const [servidores, setServidores] = useState([]);
+  const [metricas, setMetricas] = useState({});
+  const [cargando, setCargando] = useState(true);
+  const [error, setError] = useState(null);
+
+  // Cargar lista de servidores y sus métricas
+  const cargarDatos = async () => {
+    try {
+      setCargando(true);
+      setError(null);
+      
+      // 1. Obtener lista de servidores
+      const resServidores = await fetch('http://localhost:8000/api/servidores/?idEmpresa=1');
+      if (!resServidores.ok) throw new Error('Error al cargar servidores');
+      const dataServidores = await resServidores.json();
+      setServidores(dataServidores.resultados);
+
+      // 2. Cargar métricas para cada servidor
+      const metricasPromesas = dataServidores.resultados.map(async servidor => {
+        const resMetricas = await fetch(
+          `http://localhost:8000/api/servidores/metricas/${servidor.id_servidor}?idEmpresa=1`
+        );
+        return resMetricas.json();
+      });
+
+      const metricasData = await Promise.all(metricasPromesas);
+      const metricasMap = {};
+      metricasData.forEach((m, i) => {
+        metricasMap[dataServidores.resultados[i].id_servidor] = m;
+      });
+      setMetricas(metricasMap);
+      
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCargando(false);
+    }
+  };
+
+  useEffect(() => {
+    cargarDatos();
+  }, []);
+
+  // Configuración común para gráficos
+  const opcionesComunes = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: {
+        position: 'right',
+      },
+      tooltip: {
+        callbacks: {
+          label: function(context) {
+            return `${context.label}: ${context.raw}`;
+          }
+        }
+      }
+    }
+  };
+
+  if (cargando) return (
+    <div className="cargando">
+      <div className="spinner"></div>
+      <p>Cargando dashboard...</p>
+    </div>
+  );
+
+  if (error) return (
+    <div className="error">
+      <p>Error al cargar datos: {error}</p>
+      <button onClick={cargarDatos}>Reintentar</button>
+    </div>
+  );
+
+  return (
+    <div className="tablero-container">
+      <h2>Dashboard de Métricas - Todos los Servidores</h2>
+      
+      <div className="servidores-grid">
+        {servidores.map(servidor => {
+          const datosServidor = metricas[servidor.id_servidor]?.resultados?.[0];
+          if (!datosServidor) return null;
+
+          const datosNiveles = {
+            labels: Object.keys(datosServidor.logs_por_nivel || {}),
+            datasets: [{
+              data: Object.values(datosServidor.logs_por_nivel || {}),
+              backgroundColor: [
+                '#FF6384', '#FFCE56', '#36A2EB', '#4BC0C0', '#9966FF'
+              ],
+              borderWidth: 1
+            }]
+          };
+
+          return (
+            <div key={servidor.id_servidor} className="servidor-card">
+              <h3>{servidor.nombreServidor}</h3>
+              <p className="ruta-servidor">{servidor.ruta}</p>
+              
+              <div className="estado-servidor">
+                <span className={`badge ${servidor.activo ? 'activo' : 'inactivo'}`}>
+                  {servidor.activo ? 'ACTIVO' : 'INACTIVO'}
+                </span>
+                <span>Logs: {datosServidor.total_logs}</span>
+              </div>
+
+              <div className="grafica-container">
+                <Doughnut 
+                  data={datosNiveles} 
+                  options={opcionesComunes}
+                />
+              </div>
+
+              <div className="metricas-rapidas">
+                <div className="metrica">
+                  <span>Último estado</span>
+                  <strong>{datosServidor.ultimo_proceso?.estado || 'N/A'}</strong>
+                </div>
+                <div className="metrica">
+                  <span>Ocurrencias</span>
+                  <strong>{datosServidor.promedio_ocurrencias?.toFixed(2) || '0'}</strong>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+export default TableroLogs;
