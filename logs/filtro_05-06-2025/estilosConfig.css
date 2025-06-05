@@ -1,0 +1,150 @@
+.multi-log-container {
+  font-family: 'Segoe UI', sans-serif;
+  max-width: 1000px;
+  margin: 20px auto;
+  padding: 20px;
+  background: #f9f9f9;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+}
+
+.agregar-archivo {
+  display: grid;
+  grid-template-columns: 1fr 100px 120px;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.agregar-archivo input {
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.agregar-archivo button {
+  background: #4CAF50;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.3s;
+}
+
+.agregar-archivo button:hover {
+  background: #45a049;
+}
+
+.lista-archivos {
+  background: white;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  padding: 12px 15px;
+  text-align: left;
+  border-bottom: 1px solid #eee;
+}
+
+th {
+  background: #f2f2f2;
+  font-weight: 500;
+}
+
+.ruta-cell {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.estado {
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.estado.activo {
+  color: #2e7d32;
+  background: #e8f5e9;
+}
+
+.estado.inactivo {
+  color: #666;
+  background: #f5f5f5;
+}
+
+.accion-btn {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.accion-btn.iniciar {
+  background: #2196F3;
+  color: white;
+}
+
+.accion-btn.detener {
+  background: #f44336;
+  color: white;
+}
+
+.accion-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.error {
+  background: #ffebee;
+  color: #c62828;
+  padding: 10px 15px;
+  border-radius: 4px;
+  margin-top: 15px;
+  cursor: pointer;
+}
+
+.cargando {
+  color: #0d47a1;
+  padding: 10px 0;
+  text-align: center;
+}
+
+.no-archivos {
+  text-align: center;
+  color: #666;
+  padding: 20px;
+}
+
+
+
+/* Botón Eliminar */
+button.eliminar {
+  background-color: #ff4444;
+  color: white;
+  border: none;
+  padding: 5px 10px;
+  margin-left: 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+button.eliminar:hover {
+  background-color: #cc0000;
+}
+
+/* Ajuste para los botones en celda de acciones */
+td button {
+  min-width: 80px;
+}
