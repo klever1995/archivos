@@ -37,8 +37,9 @@ class ProcesosLogger:
 
     @staticmethod
     def finalizar_proceso(idAuditoria: int, totalLogs: int, ultimo_byte: int) -> bool:
-        """Marca el fin de un proceso y actualiza métricas."""
+        """Marca el fin de un proceso y actualiza métricas de forma ATÓMICA."""
         with app.app_context():
+            db.session.begin()  # Inicia transacción explícita
             try:
                 proceso = LoProcesos.query.get(idAuditoria)
                 if proceso:
@@ -46,13 +47,13 @@ class ProcesosLogger:
                     proceso.totalLogsProcesados = totalLogs
                     proceso.ultimo_byte_procesado = ultimo_byte
                     proceso.estado = 'COMPLETADO'
-                    db.session.commit()
-                    print("✅ Proceso finalizado correctamente.")
+                    db.session.commit()  # Confirmar cambios
+                    print(f"✅ Proceso {idAuditoria} finalizado y persistido en DB.")
                     return True
                 return False
             except Exception as e:
-                db.session.rollback()
-                print(f"❌ Error al finalizar proceso: {e}")
+                db.session.rollback()  # Revertir en caso de error
+                print(f"❌ Error al finalizar proceso {idAuditoria}: {e}")
                 return False
 
     @staticmethod
