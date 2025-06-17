@@ -1,0 +1,373 @@
+from fastapi import FastAPI, HTTPException, Form
+from fastapi.responses import JSONResponse
+from fastapi import BackgroundTasks
+import os
+import sys
+import re
+import time
+from difflib import SequenceMatcher
+from datetime import datetime
+import hashlib
+from flask import Flask
+from collections import defaultdict
+from insertar import Logger
+from consumos.consulta_ia_openai import Consulta_ia_openai
+from concurrent.futures import ThreadPoolExecutor
+from metodos_loprocesos import ProcesosLogger
+from fastapi.middleware.cors import CORSMiddleware
+from modelo.loServidores import loServidores  
+from modelo.loProcesos import LoProcesos      
+from modelo.loLogs import loLogs  
+from modelo.loErrorconocido import loErrorconocido
+from logs_procesados import router as logs_procesados_router
+from logs_procesos import router as logs_procesos_router
+from logs_servidor import router as servidores_router
+import logging
+from config import init_app, db
+from pydantic import BaseModel
+from typing import Optional
+
+# --- Configuración inicial ---
+PATRON_NIVEL = re.compile(r'\b(ERROR|WARN|INFO|DEBUG)\b')
+PATRON_COMPONENTE = re.compile(r'\b(?:ERROR|WARN|INFO|DEBUG)\s+\[([^\]]+)\]')
+PATRON_HILO = re.compile(r'\(([^)]+)\)')
+PATRON_CATEGORIAS = {
+    'start_send': re.compile(r'inicia envio', re.IGNORECASE),
+    'end_send': re.compile(r'fin envio', re.IGNORECASE),
+    'ftp_error': re.compile(r'FTP.*ERROR', re.IGNORECASE),
+    'general_error': re.compile(r'ERROR', re.IGNORECASE),
+}
+
+os.environ['NO_PROXY'] = 'recursoazureopenaimupi.openai.azure.com'
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+flask_app = Flask(__name__)
+init_app(flask_app)
+
+RUTA_BASE_LOGS = "C:/Users/klever.robalino/Downloads/"
+procesos_activos_por_archivo = {} 
+
+# Configuración para mantener tus prints en consola
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.StreamHandler())
+
+# --- Constantes y configuraciones ---
+PRIORIDAD = ['ERROR', 'WARN', 'INFO', 'DEBUG', 'UNKNOWN']
+CATEGORIAS = {
+    'start_send': re.compile(r'inicia envio', re.IGNORECASE),
+    'end_send': re.compile(r'fin envio', re.IGNORECASE),
+    'ftp_error': re.compile(r'FTP.*ERROR', re.IGNORECASE),
+    'general_error': re.compile(r'ERROR', re.IGNORECASE),
+}
+
+# --- Clases ---
+class ProcesoConfig(BaseModel):
+    activo: bool
+    intervalo_minutos: int
+    archivo: Optional[str] = None
+    idServidor: Optional[int] = None 
+
+# --- Variables globales ---
+proceso_config = {
+    "activo": False,
+    "intervalo_minutos": 5,
+    "archivo": None
+}
+
+# --- Funciones de procesamiento ---
+def es_inicio_log(linea: str) -> bool:
+    return bool(re.match(r"\d{2}:\d{2}:\d{2},\d{3}", linea))
+
+def extraer_componente(linea: str) -> str:
+    match = re.search(r'\b(?:ERROR|WARN|INFO|DEBUG)\s+\[([^\]]+)\]', linea)
+    return match.group(1).strip() if match else "desconocido"
+
+def extraer_hilo(linea: str) -> str:
+    match = re.search(r'\(([^)]+)\)', linea)
+    return match.group(1).strip() if match else "main"
+
+def extraer_nivel(linea: str) -> str:
+    niveles = ['ERROR', 'WARN', 'INFO', 'DEBUG']
+    for nivel in niveles:
+        if f' {nivel} ' in linea:
+            return nivel
+    return 'UNKNOWN'
+
+def categorizar_mensaje(texto: str) -> str:
+    for categoria, patron in CATEGORIAS.items():
+        if patron.search(texto):
+            return categoria
+    return 'otros'
+
+def limitar_longitud(texto: str, max_len=30000):
+    return texto if len(texto) <= max_len else texto[:max_len] + '...'
+
+def prioridad_nivel(nivel):
+    return PRIORIDAD.index(nivel) if nivel in PRIORIDAD else len(PRIORIDAD)
+
+def contar_logs_procesados(file_path: str) -> int:
+    with open(file_path, 'r', encoding='utf-8') as file:
+        return sum(1 for line in file if line.startswith('# Bloque encontrado'))
+
+def consultar_openai_paralelo(logs: list) -> list:
+    """Consulta OpenAI en paralelo para múltiples logs."""
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        return list(executor.map(lambda log: Consulta_ia_openai().interpretar_logs(log), logs))
+
+def extraer_bloques_log(chunk: str, offset_linea: int = 0) -> list:
+    bloques = []
+    bloque_actual = []
+    linea_inicio = None
+    lineas = chunk.splitlines(keepends=True)
+
+    for i, linea in enumerate(lineas, start=offset_linea):
+        if es_inicio_log(linea):
+            if bloque_actual:
+                bloques.append({
+                    'linea_inicio': linea_inicio,
+                    'contenido': ''.join(bloque_actual)
+                })
+            bloque_actual = [linea]
+            linea_inicio = i
+        elif bloque_actual:
+            if linea.startswith(("   ", "\t", "at ")):
+                bloque_actual.append(linea)
+            else:
+                bloques.append({
+                    'linea_inicio': linea_inicio,
+                    'contenido': ''.join(bloque_actual)
+                })
+                bloque_actual = []
+
+    if bloque_actual:
+        bloques.append({
+            'linea_inicio': linea_inicio,
+            'contenido': ''.join(bloque_actual)
+        })
+
+    return bloques
+
+def procesar_bloque(bloque_actual, linea_inicio, reporte):
+    mensaje_completo = "".join(bloque_actual).strip()
+    nivel = extraer_nivel(mensaje_completo)
+    categoria = categorizar_mensaje(mensaje_completo)
+    componente = extraer_componente(mensaje_completo)
+    hilo = extraer_hilo(mensaje_completo)
+
+    mensaje_normalizado = re.sub(r'^\d{2}:\d{2}:\d{2},\d{3}\s*', '', mensaje_completo).strip()
+    mensaje_normalizado = re.sub(r'\([^)]+\)', '(THREAD)', mensaje_normalizado)
+    mensaje_normalizado = re.sub(r'\d+', '[NUM]', mensaje_normalizado)
+    mensaje_normalizado = mensaje_normalizado.lower()
+
+    clave_existente = None
+    for clave_actual in reporte:
+        if (nivel == clave_actual[0] and 
+            categoria == clave_actual[1] and 
+            SequenceMatcher(None, mensaje_normalizado, clave_actual[2]).ratio() >= 0.8):
+            clave_existente = clave_actual
+            break
+
+    clave = clave_existente if clave_existente else (nivel, categoria, mensaje_normalizado)
+
+    reporte[clave].update({
+        'count': reporte[clave]['count'] + 1,
+        'lineas': reporte[clave]['lineas'] + [linea_inicio],
+        'nivel': nivel,
+        'categoria': categoria,
+        'componente': componente,
+        'hilo': hilo,
+        'mensaje': mensaje_completo,
+        'mensaje_normalizado': mensaje_normalizado
+    })
+
+def insertar_logs_a_bd(reporte: dict, idServidor: int, idAuditoria: int) -> int:
+    total_insertados = 0
+    consulta = Consulta_ia_openai()
+    total_logs = len(reporte)
+    inicio_tiempo = time.time()
+    logs_nuevos = []
+    logs_a_insertar = []
+    fecha_actual = datetime.now()
+
+    try:
+        with flask_app.app_context():
+            for i, ((nivel, categoria, _), datos) in enumerate(reporte.items(), start=1):
+                if nivel not in ['WARN', 'ERROR']:
+                    continue
+
+                mensaje_normalizado = datos['mensaje_normalizado']
+                hash_error = hashlib.sha256(mensaje_normalizado.encode()).hexdigest()
+                error_conocido = db.session.query(loErrorconocido).filter(
+                    loErrorconocido.hasherror == hash_error,
+                    loErrorconocido.nivel == nivel
+                ).first()
+
+                respuesta_openai = None
+                if not error_conocido and nivel == 'ERROR':
+                    logs_nuevos.append({
+                        'hash': hash_error,
+                        'mensaje': mensaje_normalizado,
+                        'nivel': nivel
+                    })
+
+                logs_a_insertar.append({
+                    'idEmpresa': 1,
+                    'idServidor': idServidor,
+                    'idAuditoria': idAuditoria,
+                    'operador': 0,
+                    'mensaje': mensaje_normalizado,
+                    'nivel': nivel,
+                    'componente': datos['componente'],
+                    'hilo': datos['hilo'][:200] if datos['hilo'] else None,
+                    'categoria': categoria,
+                    'estado': 'ACTIVO',
+                    'lineas': datos['lineas'],
+                    'ocurrencias': datos['count'],
+                    'respuestaOpenai': error_conocido.respuestaopenai if error_conocido else None,
+                    'fechaCreacion': fecha_actual
+                })
+
+                if i % max(1, total_logs // 10) == 0:
+                    logger.info(f"   🗃️ Preparados {i}/{total_logs} logs ({(i/total_logs)*100:.1f}%)")
+
+            if logs_nuevos:
+                logger.info("🔄 Consultando OpenAI en paralelo...")
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    respuestas = list(executor.map(
+                        lambda log: consulta.interpretar_logs(log['mensaje'][:2000]),
+                        logs_nuevos
+                    ))
+                
+                for log, respuesta in zip(logs_nuevos, respuestas):
+                    for log_insertar in logs_a_insertar:
+                        if log_insertar['mensaje'] == log['mensaje']:
+                            log_insertar['respuestaOpenai'] = respuesta
+
+                db.session.bulk_insert_mappings(loErrorconocido, [
+                    {
+                        'hasherror': log['hash'],
+                        'mensajenormalizado': log['mensaje'],
+                        'nivel': log['nivel'],
+                        'respuestaopenai': respuesta,
+                        'fechaCreacion': fecha_actual
+                    } for log, respuesta in zip(logs_nuevos, respuestas)
+                ])
+
+            logger.info("💾 Insertando logs en BD (operación masiva)...")
+            db.session.bulk_insert_mappings(loLogs, logs_a_insertar)
+            db.session.commit()
+            total_insertados = len(logs_a_insertar)
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"❌ Error en inserción masiva: {str(e)}")
+
+    duracion = time.time() - inicio_tiempo
+    logger.info(f"✅ Inserción finalizada. {total_insertados}/{total_logs} logs insertados en {duracion:.2f} segundos.")
+    return total_insertados
+
+def generar_reporte_logs(bloques: list, idServidor: int, idAuditoria: int) -> dict: 
+    logger.info(f"⏳ Inicio generación reporte para {len(bloques)} bloques")
+    inicio_tiempo = time.time()
+    
+    reporte = defaultdict(lambda: {
+        'count': 0,
+        'lineas': [],
+        'nivel': '',
+        'categoria': '',
+        'componente': '',
+        'hilo': '',
+        'mensaje': '',
+        'mensaje_normalizado': ''
+    })
+
+    for i, bloque in enumerate(bloques, start=1):
+        lineas_bloque = bloque['contenido'].split('\n')
+        procesar_bloque(lineas_bloque, str(bloque['linea_inicio']), reporte)
+        if i % max(1, len(bloques)//10) == 0:
+            logger.info(f"   🔹 Procesados {i}/{len(bloques)} bloques ({(i/len(bloques))*100:.1f}%)")
+
+    duracion = time.time() - inicio_tiempo
+    logger.info(f"✅ Reporte generado en {duracion:.2f} segundos. Logs únicos: {len(reporte)}")
+
+    total_insertados = insertar_logs_a_bd(reporte, idServidor, idAuditoria)
+    logger.info(f"✅ Insertados {total_insertados} logs en la BD")
+
+    return reporte
+
+def procesar_log_en_segundo_plano(nombre_archivo: str, idServidor: int, bloque_size: Optional[int] = None):
+    global procesos_activos_por_archivo
+    
+    # 1. Verificación más eficiente de archivos en proceso
+    if procesos_activos_por_archivo.get(nombre_archivo):
+        logger.info(f"⏸️ Archivo {nombre_archivo} ya en proceso. Evitando duplicado.")
+        return
+
+    procesos_activos_por_archivo[nombre_archivo] = True
+    bloque = None
+    
+    try:
+        with flask_app.app_context():
+            # 2. Validación rápida de servidor y archivo
+            if not db.session.get(loServidores, idServidor):
+                logger.error("❌ Servidor no existe")
+                return
+
+            ruta_completa = os.path.join(RUTA_BASE_LOGS, nombre_archivo)
+            if not os.path.exists(ruta_completa):
+                logger.error(f"❌ Archivo no encontrado: {ruta_completa}")
+                return
+
+            tamaño_archivo = os.path.getsize(ruta_completa)
+            
+            # 3. Nueva lógica de bloques (10MB fijos o archivo completo)
+            if tamaño_archivo <= 1048576:  # ≤1MB = procesar completo
+                logger.info(f"🔹 Procesando archivo pequeño ({tamaño_archivo/1024:.2f} KB) completo")
+                with open(ruta_completa, 'r', encoding='utf-8', errors='ignore') as f:
+                    contenido = f.read()
+                bloques_procesados = extraer_bloques_log(contenido)
+            else:
+                # Usar 10MB fijos (ignorando división por 10)
+                tamaño_bloque = bloque_size if bloque_size else 10485760
+                logger.info(f"🔷 Procesando bloque fijo de {tamaño_bloque/1024/1024:.2f} MB")
+                bloque = ProcesosLogger.reservar_bloque(
+                    ruta_archivo=ruta_completa,
+                    idEmpresa=1,
+                    operador=0,
+                    idServidor=idServidor,
+                    bloque_size=tamaño_bloque
+                )
+                if not bloque:
+                    logger.info("✅ No hay nuevos logs por procesar")
+                    return
+                
+                # Lectura optimizada del chunk
+                with open(ruta_completa, 'rb') as f:
+                    f.seek(bloque['byte_inicio'])
+                    chunk = f.read(bloque['byte_fin'] - bloque['byte_inicio'] + 1).decode('utf-8', errors='ignore')
+                bloques_procesados = extraer_bloques_log(chunk, offset_linea=bloque.get('linea_inicio', 0))
+
+            # 4. Procesamiento y reporte (común para ambos casos)
+            if bloques_procesados:
+                reporte = generar_reporte_logs(bloques_procesados, idServidor, bloque['idAuditoria'] if bloque else 0)
+                total_logs = sum(datos['count'] for datos in reporte.values())
+                
+                if bloque:
+                    ProcesosLogger.finalizar_proceso(
+                        idAuditoria=bloque['idAuditoria'],
+                        totalLogs=total_logs,
+                        ultimo_byte=bloque['byte_fin']
+                    )
+                logger.info(f"✅ Procesados {total_logs} logs")
+            else:
+                logger.warning("⚠️ No se encontraron bloques válidos")
+                if bloque:
+                    ProcesosLogger.marcar_error(bloque['idAuditoria'])
+
+    except Exception as e:
+        logger.error(f"💥 Error crítico: {str(e)}", exc_info=True)
+        if bloque and 'idAuditoria' in bloque:
+            ProcesosLogger.marcar_error(bloque['idAuditoria'])
+    finally:
+        procesos_activos_por_archivo.pop(nombre_archivo, None)
