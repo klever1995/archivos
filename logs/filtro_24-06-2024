@@ -1,0 +1,1653 @@
+---------------------------insertar.py
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+import re
+import hashlib
+from datetime import datetime
+from difflib import SequenceMatcher
+from collections import defaultdict
+from flask import Flask
+from config import init_app, db
+from modelo.loLogs import loLogs
+from modelo.loErrorconocido import loErrorconocido
+from modelo.asEmpresa import asEmpresa
+
+
+
+app = Flask(__name__)
+init_app(app)
+
+class Logger:
+    PATRON_NIVEL = re.compile(r'\b(ERROR|FATAL|WARN|INFO|DEBUG)\b')
+    PATRON_COMPONENTE = re.compile(r'\b(?:ERROR|WARN|INFO|DEBUG)\s+\[([^\]]+)\]')
+    PATRON_HILO = re.compile(r'\(([^)]+)\)')
+    PRIORIDAD = ['ERROR', 'FATAL', 'WARN', 'INFO', 'DEBUG', 'UNKNOWN']
+    CATEGORIAS = {
+        'start_send': re.compile(r'inicia envio', re.IGNORECASE),
+        'end_send': re.compile(r'fin envio', re.IGNORECASE),
+        'ftp_error': re.compile(r'FTP.*ERROR', re.IGNORECASE),
+        'general_error': re.compile(r'ERROR', re.IGNORECASE),
+    }
+
+    @staticmethod
+    def es_inicio_log(linea: str) -> bool:
+        return bool(re.match(r"\d{2}:\d{2}:\d{2},\d{3}", linea))
+
+    @staticmethod
+    def extraer_componente(linea: str) -> str:
+        match = re.search(r'\b(?:ERROR|WARN|INFO|DEBUG)\s+\[([^\]]+)\]', linea)
+        return match.group(1).strip() if match else "desconocido"
+
+    @staticmethod
+    def extraer_hilo(linea: str) -> str:
+        match = re.search(r'\(([^)]+)\)', linea)
+        return match.group(1).strip() if match else "main"
+
+    @staticmethod
+    def extraer_nivel(linea: str) -> str:
+        niveles = ['ERROR', 'FATAL', 'WARN', 'INFO', 'DEBUG']
+        for nivel in niveles:
+            if f' {nivel} ' in linea:
+                return nivel
+        return 'UNKNOWN'
+
+    @staticmethod
+    def categorizar_mensaje(texto: str) -> str:
+        for categoria, patron in Logger.CATEGORIAS.items():
+            if patron.search(texto):
+                return categoria
+        return 'otros'
+
+    @staticmethod
+    def limitar_longitud(texto: str, max_len=30000) -> str:
+        return texto if len(texto) <= max_len else texto[:max_len] + '...'
+
+    @staticmethod
+    def prioridad_nivel(nivel: str) -> int:
+        return Logger.PRIORIDAD.index(nivel) if nivel in Logger.PRIORIDAD else len(Logger.PRIORIDAD)
+
+    @staticmethod
+    def procesar_bloque(bloque_actual, linea_inicio, reporte):
+        mensaje_completo = "".join(bloque_actual).strip()
+        nivel = Logger.extraer_nivel(mensaje_completo)
+        categoria = Logger.categorizar_mensaje(mensaje_completo)
+        componente = Logger.extraer_componente(mensaje_completo)
+        hilo = Logger.extraer_hilo(mensaje_completo)
+
+        mensaje_normalizado = re.sub(r'^\d{2}:\d{2}:\d{2},\d{3}\s*', '', mensaje_completo).strip()
+        mensaje_normalizado = re.sub(r'\([^)]+\)', '(THREAD)', mensaje_normalizado)
+        mensaje_normalizado = re.sub(r'\d+', '[NUM]', mensaje_normalizado)
+        mensaje_normalizado = mensaje_normalizado.lower()
+
+        clave_existente = None
+        for clave_actual in reporte:
+            if (nivel == clave_actual[0] and 
+                categoria == clave_actual[1] and 
+                SequenceMatcher(None, mensaje_normalizado, clave_actual[2]).ratio() >= 0.8):
+                clave_existente = clave_actual
+                break
+
+        clave = clave_existente if clave_existente else (nivel, categoria, mensaje_normalizado)
+        reporte[clave].update({
+            'count': reporte[clave]['count'] + 1,
+            'lineas': reporte[clave]['lineas'] + [linea_inicio],
+            'nivel': nivel,
+            'categoria': categoria,
+            'componente': componente,
+            'hilo': hilo,
+            'mensaje': mensaje_completo,
+            'mensaje_normalizado': mensaje_normalizado
+        })
+
+
+--------------------------------------metodos_loprocesos
+import sys
+import os
+import hashlib
+from flask import Flask
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from config import init_app, db 
+from typing import Optional, Dict, Union
+from modelo.loProcesos import LoProcesos
+import logging
+from datetime import datetime
+
+app = Flask(__name__)
+init_app(app)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
+class ProcesosLogger:
+
+    @staticmethod
+    def iniciar_proceso(
+        idEmpresa: int,
+        operador: int,
+        idServidor: int = None,
+        procesoActivo: bool = False,  # Nuevo parámetro
+        intervaloMinutos: int = 5     # Nuevo parámetro
+    ) -> int:
+        """Registra el inicio de un nuevo proceso, ahora con soporte para ejecución periódica."""
+        with app.app_context():
+            try:
+                nuevo_proceso = LoProcesos(
+                    idEmpresa=idEmpresa,
+                    operador=operador,
+                    idServidor=idServidor,
+                    fechaInicio=datetime.now(),
+                    totalLogsProcesados=0,
+                    estado='PROCESANDO',
+                    procesoActivo=procesoActivo,      # Nuevo campo
+                    intervaloMinutos=intervaloMinutos # Nuevo campo
+                )
+                db.session.add(nuevo_proceso)
+                db.session.commit()
+                logger.info(f"✅ Proceso {nuevo_proceso.idAuditoria} iniciado (Activo: {procesoActivo}, Intervalo: {intervaloMinutos} min)")
+                return nuevo_proceso.idAuditoria
+            except Exception as e:
+                db.session.rollback()
+                logger.error(f"❌ Error al iniciar proceso: {str(e)}", exc_info=True)
+                return -1
+
+    @staticmethod
+    def finalizar_proceso(
+        idAuditoria: int,
+        totalLogs: int,
+        ultimo_byte: int,
+        mantenerActivo: bool = False  # Nuevo parámetro para procesos periódicos
+    ) -> bool:
+        """Marca el fin de un proceso, permitiendo mantenerlo activo para reprocesamiento."""
+        with app.app_context():
+            try:
+                proceso = LoProcesos.query.get(idAuditoria)
+                if proceso:
+                    proceso.fechaFin = datetime.now()
+                    proceso.totalLogsProcesados = totalLogs
+                    proceso.ultimo_byte_procesado = ultimo_byte
+                    proceso.estado = 'COMPLETADO'
+                    proceso.procesoActivo = mantenerActivo  # Actualiza estado periódico
+                    db.session.commit()
+                    logger.info(f"✅ Proceso {idAuditoria} finalizado. Mantener activo: {mantenerActivo}")
+                    return True
+                return False
+            except Exception as e:
+                db.session.rollback()
+                logger.error(f"❌ Error al finalizar proceso {idAuditoria}: {str(e)}", exc_info=True)
+                return False
+            
+    @staticmethod
+    def obtener_procesos_activos() -> list:
+        """Reemplaza el diccionario global procesos_activos_por_archivo."""
+        with app.app_context():
+            try:
+                return db.session.query(LoProcesos).filter(
+                    LoProcesos.procesoActivo == True,
+                    LoProcesos.estado.in_(['PROCESANDO', 'COMPLETADO'])
+                ).all()
+            except Exception as e:
+                logger.error(f"❌ Error obteniendo procesos activos: {str(e)}")
+                return []
+
+    @staticmethod
+    def calcular_checksum(ruta_archivo: str) -> str:
+        """Genera SHA-256 del archivo."""
+        hash_sha256 = hashlib.sha256()
+        with open(ruta_archivo, 'rb') as f:
+            for chunk in iter(lambda: f.read(4096), b''):
+                hash_sha256.update(chunk)
+        return hash_sha256.hexdigest()
+
+    @staticmethod
+    def reservar_bloque(
+        ruta_archivo: str,
+        idEmpresa: int,
+        operador: int,
+        idServidor: int = None,
+        bloque_size: int = None,
+        forzar_completo: bool = False,
+        intervaloMinutos: int = 5  # Parámetro agregado para intervalo
+    ) -> Optional[Dict[str, Union[int, str]]]:
+        with app.app_context():
+            try:
+                if not os.path.exists(ruta_archivo):
+                    logger.error(f"Archivo no encontrado: {ruta_archivo}")
+                    return None
+
+                checksum = ProcesosLogger.calcular_checksum(ruta_archivo)
+                tamano_archivo = os.path.getsize(ruta_archivo)
+
+                # Procesamiento completo para archivos pequeños o forzados
+                if forzar_completo or tamano_archivo < 1024:
+                    ultimo_proceso = db.session.query(LoProcesos).filter(
+                        LoProcesos.archivo == ruta_archivo,
+                        LoProcesos.estado.in_(['COMPLETADO', 'PROCESANDO']),
+                        LoProcesos.idServidor == (idServidor if idServidor else LoProcesos.idServidor)
+                    ).order_by(LoProcesos.byte_fin.desc()).first()
+
+                    if ultimo_proceso and ultimo_proceso.byte_fin >= tamano_archivo:
+                        logger.info("Archivo ya procesado completamente")
+                        return None
+
+                    nuevo_proceso = LoProcesos(
+                        idEmpresa=idEmpresa,
+                        operador=operador,
+                        idServidor=idServidor,
+                        archivo=ruta_archivo,
+                        byte_inicio=0,
+                        byte_fin=tamano_archivo,
+                        estado='PROCESANDO',
+                        checksum=checksum,
+                        bloque_size=tamano_archivo,
+                        fechaInicio=datetime.now(),
+                        intervaloMinutos=intervaloMinutos  # Guardar intervalo aquí
+                    )
+                    db.session.add(nuevo_proceso)
+                    db.session.commit()
+                    return {
+                        'idAuditoria': nuevo_proceso.idAuditoria,
+                        'byte_inicio': 0,
+                        'byte_fin': tamano_archivo,
+                        'bloque_size': tamano_archivo
+                    }
+
+                # Procesamiento por bloques
+                bloque_size = bloque_size or 10485760  # 10MB por defecto
+                ultimo_proceso = db.session.query(LoProcesos).filter(
+                    LoProcesos.archivo == ruta_archivo,
+                    LoProcesos.estado.in_(['COMPLETADO', 'PROCESANDO']),
+                    LoProcesos.idServidor == (idServidor if idServidor else LoProcesos.idServidor)
+                ).with_for_update().order_by(LoProcesos.byte_fin.desc()).first()
+
+                byte_inicio = ultimo_proceso.byte_fin + 1 if ultimo_proceso else 0
+
+                # Registrar incluso si no hay crecimiento
+                if byte_inicio >= tamano_archivo:
+                    nuevo_proceso = LoProcesos(
+                        idEmpresa=idEmpresa,
+                        operador=operador,
+                        idServidor=idServidor,
+                        archivo=ruta_archivo,
+                        byte_inicio=ultimo_proceso.byte_fin if ultimo_proceso else 0,
+                        byte_fin=tamano_archivo,
+                        estado='COMPLETADO',
+                        checksum=checksum,
+                        bloque_size=0,
+                        fechaInicio=datetime.now(),
+                        fechaFin=datetime.now(),
+                        totalLogsProcesados=0,
+                        intervaloMinutos=intervaloMinutos  # Guardar intervalo aquí también
+                    )
+                    db.session.add(nuevo_proceso)
+                    db.session.commit()
+                    logger.info("Registro creado para archivo sin cambios")
+                    return {
+                        'idAuditoria': nuevo_proceso.idAuditoria,
+                        'byte_inicio': nuevo_proceso.byte_inicio,
+                        'byte_fin': nuevo_proceso.byte_fin,
+                        'bloque_size': 0
+                    }
+
+                byte_fin = min(byte_inicio + bloque_size - 1, tamano_archivo)
+
+                # Si queda menos de 1MB, procesar hasta el final
+                if (tamano_archivo - byte_fin) < 1048576:
+                    byte_fin = tamano_archivo - 1
+
+                nuevo_proceso = LoProcesos(
+                    idEmpresa=idEmpresa,
+                    operador=operador,
+                    idServidor=idServidor,
+                    archivo=ruta_archivo,
+                    byte_inicio=byte_inicio,
+                    byte_fin=byte_fin,
+                    estado='PROCESANDO',
+                    checksum=checksum,
+                    bloque_size=bloque_size,
+                    fechaInicio=datetime.now(),
+                    intervaloMinutos=intervaloMinutos  # Guardar intervalo aquí
+                )
+                db.session.add(nuevo_proceso)
+                db.session.commit()
+                return {
+                    'idAuditoria': nuevo_proceso.idAuditoria,
+                    'byte_inicio': byte_inicio,
+                    'byte_fin': byte_fin,
+                    'bloque_size': bloque_size
+                }
+
+            except Exception as e:
+                db.session.rollback()
+                logger.error(f"Error al reservar bloque: {str(e)}")
+                return None
+
+
+    @staticmethod
+    def marcar_error(idAuditoria: int):
+        """Marca un proceso como fallido."""
+        with app.app_context():
+            proceso = LoProcesos.query.get(idAuditoria)
+            if proceso:
+                proceso.estado = 'FALLIDO'
+                db.session.commit()
+
+    @staticmethod
+    def obtener_ultimo_byte_procesado(ruta_archivo: str, idServidor: int = None) -> int:
+        """Obtiene el último byte procesado para un archivo (y servidor, si se especifica)."""
+        with app.app_context():
+            try:
+                query = db.session.query(LoProcesos).filter(
+                    LoProcesos.archivo == ruta_archivo,
+                    LoProcesos.estado == 'COMPLETADO'
+                )
+                if idServidor:
+                    query = query.filter(LoProcesos.idServidor == idServidor)
+
+                ultimo_proceso = query.order_by(LoProcesos.byte_fin.desc()).first()
+                return ultimo_proceso.byte_fin if ultimo_proceso else 0
+            except Exception as e:
+                print(f"❌ Error obteniendo último byte: {e}")
+                return 0
+
+
+
+-----------------------------servicios
+from fastapi import FastAPI, HTTPException, Form, BackgroundTasks
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional
+import os
+import hashlib
+from flask import Flask 
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+import time
+import logging
+from config import init_app, db
+from datetime import datetime
+from collections import defaultdict
+from insertar import Logger
+from metodos_loprocesos import ProcesosLogger
+from modelo.loServidores import loServidores
+from modelo.loProcesos import LoProcesos
+from modelo.loLogs import loLogs
+from modelo.loErrorconocido import loErrorconocido
+from logs_procesados import router as logs_procesados_router
+from logs_procesos import router as logs_procesos_router
+from logs_servidor import router as servidores_router
+from consumos.consulta_ia_openai import Consulta_ia_openai
+from concurrent.futures import ThreadPoolExecutor
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+import atexit
+
+
+os.environ['NO_PROXY'] = 'recursoazureopenaimupi.openai.azure.com'
+
+
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.include_router(logs_procesados_router)
+app.include_router(logs_procesos_router)
+app.include_router(servidores_router)
+
+scheduler = BackgroundScheduler()
+scheduler.start()
+atexit.register(lambda: scheduler.shutdown())
+
+flask_app = Flask(__name__)
+init_app(flask_app)
+
+RUTA_BASE_LOGS = "C:/Users/klever.robalino/Downloads/"
+procesos_activos_por_archivo = {}
+
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.StreamHandler())
+
+class ProcesoConfig(BaseModel):
+    activo: bool
+    intervalo_minutos: int
+    archivo: Optional[str] = None
+    idServidor: Optional[int] = None
+
+proceso_config = {
+    "activo": False,
+    "intervalo_minutos": 5,
+    "archivo": None
+}
+
+def contar_logs_procesados(file_path: str) -> int:
+    with open(file_path, 'r', encoding='utf-8') as file:
+        return sum(1 for line in file if line.startswith('# Bloque encontrado'))
+
+def consultar_openai_paralelo(logs: list) -> list:
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        return list(executor.map(lambda log: Consulta_ia_openai().interpretar_logs(log), logs))
+
+def extraer_bloques_log(chunk: str, offset_linea: int = 0) -> list:
+    bloques = []
+    bloque_actual = []
+    linea_inicio = None
+    lineas = chunk.splitlines(keepends=True)
+
+    for i, linea in enumerate(lineas, start=offset_linea):
+        if Logger.es_inicio_log(linea):
+            nivel = Logger.extraer_nivel(linea)
+            if nivel in ['INFO', 'DEBUG']:
+                bloque_actual = []
+                continue
+
+            if bloque_actual:
+                bloques.append({
+                    'linea_inicio': linea_inicio,
+                    'contenido': ''.join(bloque_actual)
+                })
+            bloque_actual = [linea]
+            linea_inicio = i
+        elif bloque_actual:
+            if linea.startswith(("   ", "\t", "at ")):
+                bloque_actual.append(linea)
+            else:
+                bloques.append({
+                    'linea_inicio': linea_inicio,
+                    'contenido': ''.join(bloque_actual)
+                })
+                bloque_actual = []
+
+    if bloque_actual and Logger.extraer_nivel(bloque_actual[0]) not in ['INFO', 'DEBUG']:
+        bloques.append({
+            'linea_inicio': linea_inicio,
+            'contenido': ''.join(bloque_actual)
+        })
+    return bloques
+
+def insertar_logs_a_bd(reporte: dict, idServidor: int, idAuditoria: int) -> int:
+    niveles_importantes = {'ERROR', 'FATAL', 'WARN'}
+    logs_nuevos = []
+    logs_a_insertar = []
+    fecha_actual = datetime.now()
+
+    try:
+        with flask_app.app_context():
+            for (nivel, categoria, _), datos in reporte.items():
+                if nivel not in niveles_importantes:
+                    continue
+
+                mensaje_normalizado = datos['mensaje_normalizado']
+                hash_error = hashlib.sha256(mensaje_normalizado.encode()).hexdigest()
+                
+                error_conocido = db.session.query(loErrorconocido).filter(
+                    loErrorconocido.hasherror == hash_error,
+                    loErrorconocido.nivel == nivel
+                ).first()
+
+                if not error_conocido and nivel in {'ERROR', 'FATAL'}:
+                    logs_nuevos.append({
+                        'hash': hash_error,
+                        'mensaje': mensaje_normalizado,
+                        'nivel': nivel
+                    })
+
+                logs_a_insertar.append({
+                    'idEmpresa': 1,
+                    'idServidor': idServidor,
+                    'idAuditoria': idAuditoria,
+                    'operador': 0,
+                    'mensaje': mensaje_normalizado,
+                    'nivel': nivel,
+                    'componente': datos['componente'],
+                    'hilo': datos['hilo'][:200] if datos['hilo'] else None,
+                    'categoria': categoria,
+                    'estado': 'ACTIVO',
+                    'lineas': datos['lineas'],
+                    'ocurrencias': datos['count'],
+                    'respuestaOpenai': error_conocido.respuestaopenai if error_conocido else None,
+                    'fechaCreacion': fecha_actual
+                })
+
+            if logs_nuevos:
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    respuestas = list(executor.map(
+                        lambda log: Consulta_ia_openai().interpretar_logs(log['mensaje'][:2000]),
+                        logs_nuevos
+                    ))
+
+                for log, respuesta in zip(logs_nuevos, respuestas):
+                    for log_insertar in logs_a_insertar:
+                        if log_insertar['mensaje'] == log['mensaje'] and log_insertar['nivel'] == log['nivel']:
+                            log_insertar['respuestaOpenai'] = respuesta
+
+                db.session.bulk_insert_mappings(loErrorconocido, [{
+                    'hasherror': log['hash'],
+                    'mensajenormalizado': log['mensaje'],
+                    'nivel': log['nivel'],
+                    'respuestaopenai': respuesta,
+                    'fechaCreacion': fecha_actual
+                } for log, respuesta in zip(logs_nuevos, respuestas)])
+
+            db.session.bulk_insert_mappings(loLogs, logs_a_insertar)
+            db.session.commit()
+            return len(logs_a_insertar)
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error en inserción masiva: {str(e)}")
+        return 0
+
+def generar_reporte_logs(bloques: list, idServidor: int, idAuditoria: int) -> dict:
+    logger.info(f"⏳ Inicio generación reporte para {len(bloques)} bloques")
+    inicio_tiempo = time.time()
+    
+    reporte = defaultdict(lambda: {
+        'count': 0,
+        'lineas': [],
+        'nivel': '',
+        'categoria': '',
+        'componente': '',
+        'hilo': '',
+        'mensaje': '',
+        'mensaje_normalizado': ''
+    })
+
+    for i, bloque in enumerate(bloques, start=1):
+        nivel = Logger.extraer_nivel(bloque['contenido'])
+        if nivel not in ['WARN', 'ERROR', 'FATAL']:  
+            continue
+            
+        lineas_bloque = bloque['contenido'].split('\n')
+        Logger.procesar_bloque(lineas_bloque, str(bloque['linea_inicio']), reporte)
+        
+        if i % max(1, len(bloques)//10) == 0:
+            logger.info(f"   🔹 Procesados {i}/{len(bloques)} bloques ({(i/len(bloques))*100:.1f}%)")
+
+    duracion = time.time() - inicio_tiempo
+    logger.info(f"✅ Reporte generado en {duracion:.2f} segundos. Logs únicos: {len(reporte)}")
+
+    total_insertados = insertar_logs_a_bd(reporte, idServidor, idAuditoria)
+    logger.info(f"✅ Insertados {total_insertados} logs en la BD")
+
+    return reporte
+
+def procesar_log_en_segundo_plano(nombre_archivo: str, idServidor: int, bloque_size: Optional[int] = None, intervalo_minutos: int = 1):
+    try:
+        with flask_app.app_context():
+            # 1. Verificar si ya está en proceso en BD
+            proceso_activo = db.session.query(LoProcesos).filter(
+                LoProcesos.archivo == nombre_archivo,
+                LoProcesos.procesoActivo == True,
+                LoProcesos.idServidor == idServidor
+            ).first()
+            
+            if proceso_activo:
+                logger.info("⏸️ El archivo %s ya está siendo procesado (ID Auditoría: %s)", nombre_archivo, proceso_activo.idAuditoria)
+                return
+
+            ruta_completa = os.path.join(RUTA_BASE_LOGS, nombre_archivo)
+            
+            # 2. Verificación de existencia del archivo
+            if not os.path.exists(ruta_completa):
+                logger.error("❌ Archivo no encontrado: %s", ruta_completa)
+                return
+
+            # 3. Reservar bloque, ahora pasando el intervalo
+            bloque = ProcesosLogger.reservar_bloque(
+                ruta_archivo=ruta_completa,
+                idEmpresa=1,
+                operador=0,
+                idServidor=idServidor,
+                bloque_size=bloque_size or min(os.path.getsize(ruta_completa) // 5, 25485760),
+                forzar_completo=False,
+                intervaloMinutos=intervalo_minutos  # 👈 agregado aquí
+            )
+
+            if not bloque:
+                logger.warning("⚠️ No se pudo reservar bloque. Posibles causas:\n"
+                             "- El archivo está siendo usado por otro proceso\n"
+                             "- No hay nuevos logs para procesar\n"
+                             "- Error de conexión con la base de datos")
+                return
+
+            idAuditoria = bloque['idAuditoria']
+
+            # 4. Verificación de servidor existente
+            if not db.session.get(loServidores, idServidor):
+                logger.error("🆔 Servidor no encontrado con ID: %d", idServidor)
+                ProcesosLogger.marcar_error(idAuditoria)
+                return
+
+            tamaño_actual = os.path.getsize(ruta_completa)
+            
+            # 5. Verificación para archivo sin crecimiento
+            if bloque['byte_fin'] >= tamaño_actual:
+                if bloque['byte_fin'] == tamaño_actual:
+                    logger.info("🔄 Archivo sin cambios | Tamaño actual: %d bytes | Último byte procesado: %d", 
+                              tamaño_actual, bloque['byte_fin'])
+                else:
+                    logger.warning("⚠️ Archivo reducido de tamaño | Original: %d bytes | Actual: %d bytes",
+                                 bloque['byte_fin'], tamaño_actual)
+                
+                ProcesosLogger.finalizar_proceso(
+                    idAuditoria=idAuditoria,
+                    totalLogs=0,
+                    ultimo_byte=tamaño_actual
+                )
+                return
+
+            # 6. Procesamiento de chunk de logs
+            with open(ruta_completa, 'rb') as f:
+                f.seek(bloque['byte_inicio'])
+                chunk = f.read(bloque['byte_fin'] - bloque['byte_inicio'] + 1).decode('utf-8', errors='ignore')
+
+            # 7. Conteo de líneas previas
+            lineas_previas = 0
+            if bloque['byte_inicio'] > 0:
+                with open(ruta_completa, 'rb') as f:
+                    f.seek(0)
+                    lineas_previas = f.read(bloque['byte_inicio']).decode('utf-8', errors='ignore').count('\n')
+
+            # 8. Extracción y procesamiento de bloques
+            bloques_procesados = extraer_bloques_log(chunk, offset_linea=lineas_previas)
+            if not bloques_procesados:
+                logger.warning("ℹ️ No se encontraron bloques procesables en el chunk")
+                ProcesosLogger.marcar_error(idAuditoria)
+                return
+
+            # 9. Generación de reporte
+            reporte = generar_reporte_logs(bloques_procesados, idServidor, idAuditoria)
+            total_logs = sum(datos['count'] for datos in reporte.values())
+
+            # 10. Finalización del proceso y programación de siguiente ejecución
+            proceso = db.session.query(LoProcesos).get(idAuditoria)
+            mantener_activo = proceso.intervaloMinutos > 0 if proceso else False
+
+            ProcesosLogger.finalizar_proceso(
+                idAuditoria=idAuditoria,
+                totalLogs=total_logs,
+                ultimo_byte=bloque['byte_fin'],
+                mantenerActivo=mantener_activo
+            )
+            
+            logger.info("✅ Procesados %d logs | Archivo: %s", total_logs, nombre_archivo)
+
+            # 11. Programar siguiente ejecución si mantener_activo es True
+            if mantener_activo and proceso:
+                intervalo = proceso.intervaloMinutos
+                scheduler.add_job(
+                    procesar_log_en_segundo_plano,
+                    trigger=IntervalTrigger(minutes=intervalo),
+                    args=[nombre_archivo, idServidor, bloque_size, intervalo],
+                    id=f'log_processor_{idAuditoria}',
+                    replace_existing=True
+                )
+                logger.info(f"⏳ Proceso {idAuditoria} programado para reprocesar en {intervalo} minutos")
+
+    except Exception as e:
+        logger.error("🔥 Error procesando %s: %s", nombre_archivo, str(e), exc_info=True)
+        if 'idAuditoria' in locals():
+            with flask_app.app_context():
+                ProcesosLogger.marcar_error(idAuditoria)
+    finally:
+        logger.debug("🏁 Finalizado procesamiento para %s", nombre_archivo)
+
+
+
+
+
+---------------------------------main
+from fastapi import FastAPI, BackgroundTasks, Form, HTTPException
+from typing import Optional 
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+from servicios import (
+    flask_app, logger, proceso_config,
+    procesar_log_en_segundo_plano, ProcesoConfig
+)
+from logs_procesados import router as logs_procesados_router
+from logs_procesos import router as logs_procesos_router 
+from logs_servidor import router as servidores_router
+
+app = FastAPI()
+
+# Configuración CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Incluir routers
+app.include_router(logs_procesados_router)
+app.include_router(logs_procesos_router)
+app.include_router(servidores_router)
+
+# Variables globales
+proceso_activo = False
+procesos_activos_por_archivo = {}  # Nuevo: Para sincronización entre endpoints
+
+@app.post("/proceso-detener/")
+async def detener_proceso():
+    global proceso_activo
+    proceso_activo = False
+    proceso_config["activo"] = False
+    return {"status": "proceso_detenido", "activo": False}
+
+@app.get("/proceso-estado/")  
+async def obtener_estado():
+    return {
+        "activo": proceso_activo,
+        "archivos_procesando": list(procesos_activos_por_archivo.keys())  # Nuevo
+    }
+
+@app.get("/proceso-config/")
+async def obtener_config():
+    return {**proceso_config, "activo": proceso_activo}
+
+@app.post("/procesar-log/")
+async def procesar_log(
+    background_tasks: BackgroundTasks,
+    nombre_archivo: str = Form(...),
+    idServidor: int = Form(...),
+    intervalo_minutos: int = Form(...),  # nuevo parámetro
+    bloque_size: Optional[int] = Form(default=None)
+):
+    global proceso_activo, procesos_activos_por_archivo, proceso_config
+    
+    if nombre_archivo in procesos_activos_por_archivo:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El archivo {nombre_archivo} ya está siendo procesado"
+        )
+    
+    proceso_activo = True
+    proceso_config["activo"] = True
+    proceso_config["archivo"] = nombre_archivo
+    proceso_config["idServidor"] = idServidor
+    
+    # Actualiza el intervalo aquí:
+    proceso_config["intervalo_minutos"] = intervalo_minutos
+    
+    background_tasks.add_task(
+        procesar_log_en_segundo_plano, 
+        nombre_archivo, 
+        idServidor, 
+        bloque_size
+    )
+    
+    return {
+        "status": "procesamiento_iniciado",
+        "activo": True,
+        "archivo": nombre_archivo,
+        "intervalo_minutos": intervalo_minutos
+    }
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+-------------------------------------------------logs_servidor
+from fastapi import APIRouter, Query, HTTPException
+from datetime import datetime, timedelta
+from typing import Optional, List
+from pydantic import BaseModel  # Para modelos de respuesta
+from modelo.loServidores import loServidores
+from modelo.loLogs import loLogs
+from modelo.loProcesos import LoProcesos
+from config import db, init_app
+from flask import Flask
+from fastapi import Path
+
+# Configuración Flask (necesaria para SQLAlchemy en tu caso)
+flask_app = Flask(__name__)
+init_app(flask_app)
+
+router = APIRouter(
+    prefix="/api/servidores",
+    tags=["Servidores de Logs"],
+    responses={404: {"description": "No encontrado"}}
+)
+
+# Modelo Pydantic para respuesta estructurada
+class ServidorResponse(BaseModel):
+    id_servidor: int
+    nombre: str
+    ruta: str
+    activo: bool
+    fecha_registro: str
+    total_procesos: int
+
+class MetaResponse(BaseModel):
+    total_resultados: int
+    fecha_minima: str
+    parametros: dict
+
+class ServidorListResponse(BaseModel):
+    meta: MetaResponse
+    resultados: List[ServidorResponse]
+
+class MetricaServidorResponse(BaseModel):
+    id_servidor: int
+    nombre_servidor: str
+    ruta: str
+    activo: bool
+    ultimo_proceso: Optional[dict]  # Datos del último proceso (similar a LO_PROCESOS)
+    total_logs: int
+    logs_por_nivel: dict  # Ej: {"INFO": 10, "ERROR": 2}
+    promedio_ocurrencias: float
+
+class MetricasListResponse(BaseModel):
+    meta: MetaResponse  # Reutilizamos tu clase Meta existente
+    resultados: List[MetricaServidorResponse]
+
+# Modelo Pydantic para respuesta de logs filtrados
+class LogFiltradoResponse(BaseModel):
+    id_log: int
+    fecha_creacion: str
+    nivel: str
+    mensaje: str
+    componente: Optional[str]
+    ocurrencias: int
+    lineas: Optional[List[str]] 
+    respuestaOpenai: Optional[str]
+
+class LogsFiltradosListResponse(BaseModel):
+    meta: MetaResponse
+    resultados: List[LogFiltradoResponse]
+
+@router.get("/", response_model=ServidorListResponse)
+def consultar_servidores(
+    idEmpresa: int = Query(..., description="ID de la empresa a filtrar"),
+    dias_atras: int = Query(30, description="Cantidad de días hacia atrás para filtrar"),
+    activo: Optional[bool] = Query(None, description="Filtrar por estado activo/inactivo"),
+    limite: int = Query(100, description="Límite de registros", ge=1, le=1000)
+):
+    try:
+        with flask_app.app_context():
+            fecha_minima = datetime.now() - timedelta(days=dias_atras)
+            
+            query = db.session.query(loServidores).filter(
+                loServidores.idEmpresa == idEmpresa,
+                loServidores.fechaRegistro >= fecha_minima
+            )
+            
+            if activo is not None:
+                query = query.filter(loServidores.activo == activo)
+            
+            servidores = query.order_by(
+                loServidores.fechaRegistro.desc()
+            ).limit(limite).all()
+            
+            return {
+                "meta": {
+                    "total_resultados": len(servidores),
+                    "fecha_minima": fecha_minima.isoformat(),
+                    "parametros": {
+                        "idEmpresa": idEmpresa,
+                        "dias_atras": dias_atras,
+                        "activo": activo,
+                        "limite": limite
+                    }
+                },
+                "resultados": [{
+                    "id_servidor": s.idServidor,
+                    "nombre": s.nombreServidor,
+                    "ruta": s.ruta,
+                    "activo": s.activo,
+                    "fecha_registro": s.fechaRegistro.isoformat(),
+                    "total_procesos": len(s.procesos) if hasattr(s, 'procesos') else 0
+                } for s in servidores]
+            }
+            
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al consultar servidores: {str(e)}"
+        )
+
+# Modelo Pydantic para creación
+class ServidorCreate(BaseModel):
+    idEmpresa: int
+    ruta: str
+    nombreServidor: str
+    activo: bool = False
+
+@router.post("/")
+def crear_servidor(servidor_data: ServidorCreate):
+    try:
+        with flask_app.app_context():
+            # Validar servidor duplicado
+            if db.session.query(loServidores).filter(
+                (loServidores.ruta == servidor_data.ruta) | 
+                (loServidores.nombreServidor == servidor_data.nombreServidor)
+            ).first():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ya existe un servidor con esta ruta o nombre"
+                )
+            
+            nuevo_servidor = loServidores(
+                idEmpresa=servidor_data.idEmpresa,
+                ruta=servidor_data.ruta,
+                nombreServidor=servidor_data.nombreServidor,
+                activo=servidor_data.activo
+            )
+            
+            db.session.add(nuevo_servidor)
+            db.session.commit()
+            
+            return {
+                "id_servidor": nuevo_servidor.idServidor,
+                "mensaje": "Servidor registrado correctamente"
+            }
+            
+    except Exception as e:
+        db.session.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al crear servidor: {str(e)}"
+        )
+
+@router.delete("/{id_servidor}")
+def eliminar_servidor(id_servidor: int = Path(..., description="ID del servidor a eliminar")):
+    with flask_app.app_context():  # ✅ Inicia contexto
+        try:
+            servidor = db.session.query(loServidores).filter_by(idServidor=id_servidor).first()
+
+            if not servidor:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No se encontró el servidor con ID {id_servidor}"
+                )
+
+            db.session.delete(servidor)
+            db.session.commit()
+
+            return {
+                "id_servidor": id_servidor,
+                "mensaje": "Servidor eliminado correctamente"
+            }
+
+        except Exception as e:
+            db.session.rollback()  # ✅ Ahora sí está dentro del contexto
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error al eliminar servidor: {str(e)}"
+            )
+
+@router.get("/metricas/{id_servidor}", response_model=MetricasListResponse)
+def obtener_metricas_servidor(
+    id_servidor: int = Path(..., description="ID del servidor a consultar"),
+    idEmpresa: int = Query(..., description="ID de la empresa"),
+    dias_atras: int = Query(7, description="Rango de días para métricas históricas")
+):
+    try:
+        with flask_app.app_context():
+            # 1. Validar servidor
+            servidor = db.session.query(loServidores).filter_by(
+                idServidor=id_servidor,
+                idEmpresa=idEmpresa
+            ).first()
+            
+            if not servidor:
+                raise HTTPException(status_code=404, detail="Servidor no encontrado")
+
+            # 2. Obtener último proceso
+            ultimo_proceso = db.session.query(LoProcesos).filter_by(
+                idServidor=id_servidor
+            ).order_by(LoProcesos.fechaInicio.desc()).first()
+
+            # 3. CORRECCIÓN: Usar filter() en lugar de filter_by() para condiciones complejas
+            fecha_limite = datetime.now() - timedelta(days=dias_atras)
+            logs_por_nivel = db.session.query(
+                loLogs.nivel,
+                db.func.count(loLogs.idLogAplicacion)
+            ).filter(
+                loLogs.idServidor == id_servidor,
+                loLogs.fechaCreacion >= fecha_limite
+            ).group_by(loLogs.nivel).all()
+
+            # 4. Estructurar respuesta
+            return {
+                "meta": {
+                    "total_resultados": 1,
+                    "fecha_minima": fecha_limite.isoformat(),
+                    "parametros": {"id_servidor": id_servidor, "dias_atras": dias_atras}
+                },
+                "resultados": [{
+                    "id_servidor": servidor.idServidor,
+                    "nombre_servidor": servidor.nombreServidor,
+                    "ruta": servidor.ruta,
+                    "activo": servidor.activo,
+                    "ultimo_proceso": {
+                        "estado": ultimo_proceso.estado if ultimo_proceso else None,
+                        "logs_procesados": ultimo_proceso.totalLogsProcesados if ultimo_proceso else 0
+                    },
+                    "total_logs": sum(count for _, count in logs_por_nivel),
+                    "logs_por_nivel": {nivel: count for nivel, count in logs_por_nivel},
+                    "promedio_ocurrencias": db.session.query(
+                        db.func.avg(loLogs.ocurrencias)
+                    ).filter(loLogs.idServidor == id_servidor).scalar() or 0
+                }]
+            }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al calcular métricas: {str(e)}"
+        )
+
+class LogsFiltradosListResponse(BaseModel):
+    meta: MetaResponse
+    resultados: List[LogFiltradoResponse]
+
+@router.get("/{id_servidor}/logs-filtrados/", response_model=LogsFiltradosListResponse)
+def obtener_logs_filtrados(
+    id_servidor: int = Path(..., description="ID del servidor a consultar"),
+    idEmpresa: int = Query(..., description="ID de la empresa"),
+    nivel: Optional[str] = Query(None, description="Nivel de log (FATAL, ERROR, WARN, INFO)"),  # Modificado
+    dias_atras: Optional[int] = Query(None, description="Rango de días para filtrar")
+):
+    try:
+        with flask_app.app_context():
+            # Validar servidor
+            servidor = db.session.query(loServidores).filter_by(
+                idServidor=id_servidor,
+                idEmpresa=idEmpresa
+            ).first()
+            
+            if not servidor:
+                raise HTTPException(status_code=404, detail="Servidor no encontrado")
+
+            # Consulta base
+            query = db.session.query(loLogs).filter(
+                loLogs.idServidor == id_servidor
+            )
+
+            # Fecha mínima (usar fecha muy antigua si no viene dias_atras)
+            fecha_minima = datetime.min if dias_atras is None else datetime.now() - timedelta(days=dias_atras)
+            query = query.filter(loLogs.fechaCreacion >= fecha_minima)
+
+            # Validar nivel si viene
+            if nivel:
+                nivel = nivel.upper()
+                if nivel not in ['FATAL', 'ERROR', 'WARN', 'INFO']:  # Modificado
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="Nivel debe ser FATAL, ERROR, WARN o INFO"  # Modificado
+                    )
+                query = query.filter(loLogs.nivel == nivel)
+
+            # Obtener logs
+            logs = query.order_by(loLogs.fechaCreacion.desc()).all()
+
+            return {
+                "meta": {
+                    "total_resultados": len(logs),
+                    "fecha_minima": fecha_minima.isoformat(),
+                    "parametros": {
+                        "id_servidor": id_servidor,
+                        "nivel": nivel,
+                        "dias_atras": dias_atras
+                    }
+                },
+                "resultados": [{
+                    "id_log": log.idLogAplicacion,
+                    "fecha_creacion": log.fechaCreacion.isoformat(),
+                    "nivel": log.nivel,
+                    "mensaje": log.mensaje,
+                    "componente": log.componente,
+                    "ocurrencias": log.ocurrencias,
+                    "lineas": log.lineas,
+                    "respuestaOpenai": log.respuestaOpenai
+                } for log in logs]
+            }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al filtrar logs: {str(e)}"
+        )
+
+----------------------------------------------------------------------------multiprocesos.js
+import React, { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
+import './estilosConfig.css';
+
+const MultiLogProcessor = () => {
+  const [servidores, setServidores] = useState([]);
+  const [error, setError] = useState(null);
+  const [nuevaRuta, setNuevaRuta] = useState('');
+  const [nuevoIntervalo, setNuevoIntervalo] = useState(5);
+  const [procesosActivos, setProcesosActivos] = useState([]);
+  const intervalosRef = useRef({});
+  const navigate = useNavigate();
+
+  const fetchEstadoProceso = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/proceso-estado/');
+      if (!response.ok) throw new Error('Error al obtener estado');
+      return await response.json();
+    } catch (error) {
+      console.error("Error fetching estado:", error);
+      return { activo: false, procesos_activos: [] };
+    }
+  };
+
+  const cargarDatosIniciales = async () => {
+    try {
+      const responseServidores = await fetch('http://localhost:8000/api/servidores/?idEmpresa=1');
+      if (!responseServidores.ok) throw new Error('Error al cargar servidores');
+      const dataServidores = await responseServidores.json();
+
+      const estado = await fetchEstadoProceso();
+      const procesos = estado.procesos_activos || [];
+
+      setServidores(prevServidores =>
+        dataServidores.resultados.map(s => {
+          const servidorAnterior = prevServidores.find(ps => ps.idServidor === s.id_servidor);
+          const intervalo = servidorAnterior ? servidorAnterior.intervalo : nuevoIntervalo;
+
+          return {
+            idServidor: s.id_servidor,
+            ruta: s.ruta,
+            intervalo,
+            activo: procesos.some(p => p.archivo === s.ruta && p.activo)
+          };
+        })
+      );
+
+      setProcesosActivos(procesos);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  useEffect(() => {
+    cargarDatosIniciales();
+  }, [nuevoIntervalo]);
+
+  const procesarServidor = async (idServidor, ruta, intervaloMinutos = 5) => {
+    try {
+      const formData = new FormData();
+      formData.append('nombre_archivo', ruta);
+      formData.append('idServidor', idServidor);
+      formData.append('intervalo_minutos', intervaloMinutos);
+
+      const response = await fetch('http://localhost:8000/procesar-log/', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'Error desconocido');
+      }
+
+      return await response.json();
+    } catch (err) {
+      console.error(`Error procesando ${ruta}:`, err);
+      setError(`Error en ${ruta}: ${err.message}`);
+      throw err;
+    }
+  };
+
+  const detenerProceso = async (idAuditoria) => {
+    try {
+      const response = await fetch('http://localhost:8000/proceso-detener/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idAuditoria })
+      });
+
+      if (!response.ok) throw new Error('Error al detener proceso');
+      return await response.json();
+    } catch (err) {
+      console.error('Error deteniendo proceso:', err);
+      throw err;
+    }
+  };
+
+  const toggleProcesamiento = async (idServidor, ruta, intervalo) => {
+    const estaActivo = intervalosRef.current[idServidor];
+
+    try {
+      if (!estaActivo) {
+        await procesarServidor(idServidor, ruta, intervalo);
+
+        if (intervalo > 0) {
+          intervalosRef.current[idServidor] = {
+            timer: setInterval(async () => {
+              try {
+                await procesarServidor(idServidor, ruta, intervalo);
+              } catch (err) {
+                clearInterval(intervalosRef.current[idServidor]?.timer);
+                delete intervalosRef.current[idServidor];
+                setServidores(prev => prev.map(s =>
+                  s.idServidor === idServidor ? { ...s, activo: false } : s
+                ));
+              }
+            }, intervalo * 60 * 1000)
+          };
+        }
+      } else {
+        const proceso = procesosActivos.find(p => p.archivo === ruta);
+        if (proceso) {
+          await detenerProceso(proceso.idAuditoria);
+        }
+
+        if (intervalosRef.current[idServidor]) {
+          clearInterval(intervalosRef.current[idServidor].timer);
+          delete intervalosRef.current[idServidor];
+        }
+      }
+
+      setServidores(prev => prev.map(s =>
+        s.idServidor === idServidor ? { ...s, activo: !estaActivo } : s
+      ));
+    } catch (err) {
+      console.error("Error en toggleProcesamiento:", err);
+      setError(`Error: ${err.message}`);
+    }
+  };
+
+  const agregarServidor = async () => {
+    if (!nuevaRuta.trim()) return setError('Ruta requerida');
+
+    try {
+      const response = await fetch('http://localhost:8000/api/servidores/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idEmpresa: 1,
+          ruta: nuevaRuta,
+          nombreServidor: nuevaRuta.split('/').pop(),
+          activo: false
+        })
+      });
+
+      if (!response.ok) throw new Error(await response.text());
+
+      const nuevoServidor = await response.json();
+      setServidores(prev => [...prev, {
+        idServidor: nuevoServidor.id_servidor,
+        ruta: nuevaRuta,
+        intervalo: nuevoIntervalo,
+        activo: false
+      }]);
+      setNuevaRuta('');
+    } catch (err) {
+      setError(`Error al guardar: ${err.message}`);
+    }
+  };
+
+  const eliminarServidor = async (idServidor) => {
+    if (!window.confirm("¿Estás seguro de borrar? Todos los procesos y logs asociados serán eliminados.")) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`http://localhost:8000/api/servidores/${idServidor}`, {
+        method: 'DELETE'
+      });
+
+      if (!response.ok) throw new Error('Error al eliminar servidor');
+
+      if (intervalosRef.current[idServidor]) {
+        clearInterval(intervalosRef.current[idServidor].timer);
+        delete intervalosRef.current[idServidor];
+      }
+
+      setServidores(prev => prev.filter(s => s.idServidor !== idServidor));
+    } catch (err) {
+      setError(`Error al eliminar servidor: ${err.message}`);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      Object.values(intervalosRef.current).forEach(({ timer }) => clearInterval(timer));
+    };
+  }, []);
+
+  return (
+    <div className="multi-log-container">
+      <div className="header-con-boton">
+        <h2>Monitor de Servidores</h2>
+        <button onClick={() => navigate('/tablero-logs')} className="btn-ir-graficos">
+          Ver Dashboard de Métricas
+        </button>
+      </div>
+
+      <div className="agregar-archivo">
+        <input
+          type="text"
+          value={nuevaRuta}
+          onChange={(e) => setNuevaRuta(e.target.value)}
+          placeholder="Ej: /ruta/servidor.log"
+        />
+        <input
+          type="number"
+          min="1"
+          value={nuevoIntervalo}
+          onChange={(e) => setNuevoIntervalo(Math.max(1, e.target.valueAsNumber || 5))}
+        />
+        <button onClick={agregarServidor}>Agregar Servidor</button>
+      </div>
+
+      <div className="lista-archivos">
+        {servidores.length === 0 ? (
+          <p>No hay servidores registrados</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Servidor</th>
+                <th>Intervalo (min)</th>
+                <th>Estado</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              {servidores.map((servidor) => {
+                const estaProcesando = procesosActivos.some(p => p.archivo === servidor.ruta);
+                return (
+                  <tr key={servidor.idServidor}>
+                    <td>{servidor.ruta}</td>
+                    <td>
+                      <input
+                        type="number"
+                        min="1"
+                        value={servidor.intervalo}
+                        onChange={(e) => {
+                          const intervalo = Math.max(1, e.target.valueAsNumber || 5);
+                          setServidores(prev => prev.map(s =>
+                            s.idServidor === servidor.idServidor ? { ...s, intervalo } : s
+                          ));
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <span className={`estado ${servidor.activo ? 'activo' : ''}`}>
+                        {servidor.activo ? '▶ MONITOREANDO' : '⏸ DETENIDO'}
+                      </span>
+                      {estaProcesando && !servidor.activo && (
+                        <span className="estado-procesando"> (PROCESANDO...)</span>
+                      )}
+                    </td>
+                    <td>
+                      <button
+                        onClick={() => toggleProcesamiento(
+                          servidor.idServidor,
+                          servidor.ruta,
+                          servidor.intervalo
+                        )}
+                        className={servidor.activo ? 'detener' : 'iniciar'}
+                        disabled={estaProcesando && !servidor.activo}
+                      >
+                        {servidor.activo ? 'Detener' : 'Iniciar'}
+                      </button>
+                      <button
+                        onClick={() => eliminarServidor(servidor.idServidor)}
+                        className="eliminar"
+                      >
+                        Eliminar
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {error && (
+        <div className="error" onClick={() => setError(null)}>
+          ❌ {error}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default MultiLogProcessor;
+
+
+
+
+
+---------------------------------------------------------estilosConfig
+
+
+.multi-log-container {
+  font-family: 'Segoe UI', sans-serif;
+  max-width: 1000px;
+  margin: 20px auto;
+  padding: 20px;
+  background: #f9f9f9;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+}
+
+.agregar-archivo {
+  display: grid;
+  grid-template-columns: 1fr 100px 120px;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.agregar-archivo input {
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.agregar-archivo button {
+  background: #4CAF50;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.3s;
+}
+
+.agregar-archivo button:hover {
+  background: #45a049;
+}
+
+.lista-archivos {
+  background: white;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  padding: 12px 15px;
+  text-align: left;
+  border-bottom: 1px solid #eee;
+}
+
+th {
+  background: #f2f2f2;
+  font-weight: 500;
+}
+
+.ruta-cell {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.estado {
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.estado.activo {
+  color: #2e7d32;
+  background: #e8f5e9;
+}
+
+.estado.inactivo {
+  color: #666;
+  background: #f5f5f5;
+}
+
+.accion-btn {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.accion-btn.iniciar {
+  background: #2196F3;
+  color: white;
+}
+
+.accion-btn.detener {
+  background: #f44336;
+  color: white;
+}
+
+.accion-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.error {
+  background: #ffebee;
+  color: #c62828;
+  padding: 10px 15px;
+  border-radius: 4px;
+  margin-top: 15px;
+  cursor: pointer;
+}
+
+.cargando {
+  color: #0d47a1;
+  padding: 10px 0;
+  text-align: center;
+}
+
+.no-archivos {
+  text-align: center;
+  color: #666;
+  padding: 20px;
+}
+
+
+
+/* Estilos para el encabezado con botón */
+.header-con-boton {
+display: flex;
+justify-content: space-between;
+align-items: center;
+margin-bottom: 20px;
+flex-wrap: wrap;
+gap: 15px;
+}
+
+.btn-ir-graficos {
+background-color: #4a6fa5;
+color: white;
+border: none;
+padding: 10px 20px;
+border-radius: 4px;
+cursor: pointer;
+font-size: 14px;
+transition: all 0.3s;
+white-space: nowrap;
+}
+
+.btn-ir-graficos:hover {
+background-color: #3a5a80;
+transform: translateY(-2px);
+box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+}
+
+/* Estilos para el botón Eliminar */
+.eliminar {
+background: #ff5252;
+color: white;
+border: none;
+border-radius: 4px;
+padding: 6px 12px;
+margin-left: 8px;
+cursor: pointer;
+font-weight: 500;
+transition: all 0.2s;
+}
+
+.eliminar:hover {
+background: #ff1744;
+}
+
+/* Ajuste para los botones en la celda de acciones */
+td > button {
+margin: 2px;
+}
+
+
+.estado-procesando {
+  color: #ff9800;
+  font-size: 0.8em;
+  margin-left: 5px;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+
+
+
+
+
+
+
+
+.estado-sincronizando {
+  color: #666;
+  font-style: italic;
+  margin-left: 8px;
+  font-size: 0.9em;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.estado-procesando {
+  color: #ff9800;
+  font-weight: bold;
+  margin-left: 8px;
+}
+
