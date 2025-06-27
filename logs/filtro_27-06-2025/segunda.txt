@@ -1,0 +1,1016 @@
+----------------------servicios
+from fastapi import FastAPI, HTTPException, Form, BackgroundTasks
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional
+import os
+import hashlib
+from flask import Flask 
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+import time
+import logging
+from config import init_app, db
+from datetime import datetime
+from collections import defaultdict
+from insertar import Logger
+from metodos_loprocesos import ProcesosLogger
+from modelo.loServidores import loServidores
+from modelo.loProcesos import LoProcesos
+from modelo.loLogs import loLogs
+from modelo.loErrorconocido import loErrorconocido
+from logs_procesados import router as logs_procesados_router
+from logs_procesos import router as logs_procesos_router
+from logs_servidor import router as servidores_router
+from consumos.consulta_ia_openai import Consulta_ia_openai
+from concurrent.futures import ThreadPoolExecutor
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+import atexit
+
+
+os.environ['NO_PROXY'] = 'recursoazureopenaimupi.openai.azure.com'
+
+
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.include_router(logs_procesados_router)
+app.include_router(logs_procesos_router)
+app.include_router(servidores_router)
+
+scheduler = BackgroundScheduler()
+scheduler.start()
+atexit.register(lambda: scheduler.shutdown())
+
+flask_app = Flask(__name__)
+init_app(flask_app)
+
+RUTA_BASE_LOGS = "C:/Users/klever.robalino/Downloads/"
+procesos_activos_por_archivo = {}
+
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.StreamHandler())
+
+class ProcesoConfig(BaseModel):
+    activo: bool
+    intervalo_minutos: int
+    archivo: Optional[str] = None
+    idServidor: Optional[int] = None
+
+proceso_config = {
+    "activo": False,
+    "intervalo_minutos": 5,
+    "archivo": None
+}
+
+def contar_logs_procesados(file_path: str) -> int:
+    with open(file_path, 'r', encoding='utf-8') as file:
+        return sum(1 for line in file if line.startswith('# Bloque encontrado'))
+
+def consultar_openai_paralelo(logs: list) -> list:
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        return list(executor.map(lambda log: Consulta_ia_openai().interpretar_logs(log), logs))
+
+def extraer_bloques_log(chunk: str, offset_linea: int = 0) -> list:
+    bloques = []
+    bloque_actual = []
+    linea_inicio = None
+    lineas = chunk.splitlines(keepends=True)
+
+    for i, linea in enumerate(lineas, start=offset_linea):
+        if Logger.es_inicio_log(linea):
+            nivel = Logger.extraer_nivel(linea)
+            if nivel in ['INFO', 'DEBUG']:
+                bloque_actual = []
+                continue
+
+            if bloque_actual:
+                bloques.append({
+                    'linea_inicio': linea_inicio,
+                    'contenido': ''.join(bloque_actual)
+                })
+            bloque_actual = [linea]
+            linea_inicio = i
+        elif bloque_actual:
+            if linea.startswith(("   ", "\t", "at ")):
+                bloque_actual.append(linea)
+            else:
+                bloques.append({
+                    'linea_inicio': linea_inicio,
+                    'contenido': ''.join(bloque_actual)
+                })
+                bloque_actual = []
+
+    if bloque_actual and Logger.extraer_nivel(bloque_actual[0]) not in ['INFO', 'DEBUG']:
+        bloques.append({
+            'linea_inicio': linea_inicio,
+            'contenido': ''.join(bloque_actual)
+        })
+    return bloques
+
+def insertar_logs_a_bd(reporte: dict, idServidor: int, idAuditoria: int) -> int:
+    niveles_importantes = {'ERROR', 'FATAL', 'WARN'}
+    logs_nuevos = []
+    logs_a_insertar = []
+    fecha_actual = datetime.now()
+
+    try:
+        with flask_app.app_context():
+            for (nivel, categoria, _), datos in reporte.items():
+                if nivel not in niveles_importantes:
+                    continue
+
+                mensaje_normalizado = datos['mensaje_normalizado']
+                hash_error = hashlib.sha256(mensaje_normalizado.encode()).hexdigest()
+                
+                error_conocido = db.session.query(loErrorconocido).filter(
+                    loErrorconocido.hasherror == hash_error,
+                    loErrorconocido.nivel == nivel
+                ).first()
+
+                if not error_conocido and nivel in {'ERROR', 'FATAL'}:
+                    logs_nuevos.append({
+                        'hash': hash_error,
+                        'mensaje': mensaje_normalizado,
+                        'nivel': nivel
+                    })
+
+                logs_a_insertar.append({
+                    'idEmpresa': 1,
+                    'idServidor': idServidor,
+                    'idAuditoria': idAuditoria,
+                    'operador': 0,
+                    'mensaje': mensaje_normalizado,
+                    'nivel': nivel,
+                    'componente': datos['componente'],
+                    'hilo': datos['hilo'][:200] if datos['hilo'] else None,
+                    'categoria': categoria,
+                    'estado': 'ACTIVO',
+                    'lineas': datos['lineas'],
+                    'ocurrencias': datos['count'],
+                    'respuestaOpenai': error_conocido.respuestaopenai if error_conocido else None,
+                    'fechaCreacion': fecha_actual
+                })
+
+            if logs_nuevos:
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    respuestas = list(executor.map(
+                        lambda log: Consulta_ia_openai().interpretar_logs(log['mensaje'][:2000]),
+                        logs_nuevos
+                    ))
+
+                for log, respuesta in zip(logs_nuevos, respuestas):
+                    for log_insertar in logs_a_insertar:
+                        if log_insertar['mensaje'] == log['mensaje'] and log_insertar['nivel'] == log['nivel']:
+                            log_insertar['respuestaOpenai'] = respuesta
+
+                db.session.bulk_insert_mappings(loErrorconocido, [{
+                    'hasherror': log['hash'],
+                    'mensajenormalizado': log['mensaje'],
+                    'nivel': log['nivel'],
+                    'respuestaopenai': respuesta,
+                    'fechaCreacion': fecha_actual
+                } for log, respuesta in zip(logs_nuevos, respuestas)])
+
+            db.session.bulk_insert_mappings(loLogs, logs_a_insertar)
+            db.session.commit()
+
+            # ===== NUEVA SECCIÓN =====
+            logs_por_nivel = defaultdict(int)
+            for (nivel, _, _), datos in reporte.items():
+                if nivel in niveles_importantes:
+                    logs_por_nivel[nivel] += datos['count']
+
+            if logs_por_nivel:
+                from websocket_server import manager
+                import asyncio
+                
+                # Consulta los logs acumulados TOTALES (no solo los nuevos)
+                logs_acumulados = db.session.query(
+                    loLogs.nivel,
+                    db.func.count(loLogs.idLogAplicacion)
+                ).filter(
+                    loLogs.idServidor == idServidor  # Sin filtro por tiempo
+                ).group_by(loLogs.nivel).all()
+                
+                asyncio.run(manager.send_json_message({
+                    "eventType": "metrics_update",
+                    "data": {
+                        "idServidor": idServidor,
+                        "idAuditoria": idAuditoria,
+                        "logs_por_nivel": {nivel: count for nivel, count in logs_acumulados},  # Acumulado total
+                        "total_logs": sum(count for _, count in logs_acumulados),  # Total acumulado
+                        "timestamp": fecha_actual.isoformat()
+                    }
+                }, id_empresa=1))
+            # ===== FIN NUEVA SECCIÓN =====
+
+            return len(logs_a_insertar)
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error en inserción masiva: {str(e)}")
+        return 0
+
+def generar_reporte_logs(bloques: list, idServidor: int, idAuditoria: int) -> dict:
+    logger.info(f"⏳ Inicio generación reporte para {len(bloques)} bloques")
+    inicio_tiempo = time.time()
+    
+    reporte = defaultdict(lambda: {
+        'count': 0,
+        'lineas': [],
+        'nivel': '',
+        'categoria': '',
+        'componente': '',
+        'hilo': '',
+        'mensaje': '',
+        'mensaje_normalizado': ''
+    })
+
+    for i, bloque in enumerate(bloques, start=1):
+        nivel = Logger.extraer_nivel(bloque['contenido'])
+        if nivel not in ['WARN', 'ERROR', 'FATAL']:  
+            continue
+            
+        lineas_bloque = bloque['contenido'].split('\n')
+        Logger.procesar_bloque(lineas_bloque, str(bloque['linea_inicio']), reporte)
+        
+        if i % max(1, len(bloques)//10) == 0:
+            logger.info(f"   🔹 Procesados {i}/{len(bloques)} bloques ({(i/len(bloques))*100:.1f}%)")
+
+    duracion = time.time() - inicio_tiempo
+    logger.info(f"✅ Reporte generado en {duracion:.2f} segundos. Logs únicos: {len(reporte)}")
+
+    total_insertados = insertar_logs_a_bd(reporte, idServidor, idAuditoria)
+    logger.info(f"✅ Insertados {total_insertados} logs en la BD")
+
+    return reporte
+
+def procesar_log_en_segundo_plano(nombre_archivo: str, idServidor: int, bloque_size: Optional[int] = None, intervalo_minutos: int = 1):
+    try:
+        with flask_app.app_context():
+            # 1. Verificar si ya está en proceso en BD
+            proceso_activo = db.session.query(LoProcesos).filter(
+                LoProcesos.archivo == nombre_archivo,
+                LoProcesos.procesoActivo == True,
+                LoProcesos.idServidor == idServidor
+            ).first()
+            
+            if proceso_activo:
+                logger.info("⏸️ El archivo %s ya está siendo procesado (ID Auditoría: %s)", nombre_archivo, proceso_activo.idAuditoria)
+                return
+
+            ruta_completa = os.path.join(RUTA_BASE_LOGS, nombre_archivo)
+            
+            # 2. Verificación de existencia del archivo
+            if not os.path.exists(ruta_completa):
+                logger.error("❌ Archivo no encontrado: %s", ruta_completa)
+                return
+
+            # 3. Reservar bloque, ahora pasando el intervalo
+            bloque = ProcesosLogger.reservar_bloque(
+                ruta_archivo=ruta_completa,
+                idEmpresa=1,
+                operador=0,
+                idServidor=idServidor,
+                bloque_size=bloque_size or min(os.path.getsize(ruta_completa) // 5, 25485760),
+                forzar_completo=False,
+                intervaloMinutos=intervalo_minutos  # 👈 agregado aquí
+            )
+
+            if not bloque:
+                logger.warning("⚠️ No se pudo reservar bloque. Posibles causas:\n"
+                             "- El archivo está siendo usado por otro proceso\n"
+                             "- No hay nuevos logs para procesar\n"
+                             "- Error de conexión con la base de datos")
+                return
+
+            idAuditoria = bloque['idAuditoria']
+
+            # 4. Verificación de servidor existente
+            if not db.session.get(loServidores, idServidor):
+                logger.error("🆔 Servidor no encontrado con ID: %d", idServidor)
+                ProcesosLogger.marcar_error(idAuditoria)
+                return
+
+            tamaño_actual = os.path.getsize(ruta_completa)
+            
+            # 5. Verificación para archivo sin crecimiento
+            if bloque['byte_fin'] >= tamaño_actual:
+                if bloque['byte_fin'] == tamaño_actual:
+                    logger.info("🔄 Archivo sin cambios | Tamaño actual: %d bytes | Último byte procesado: %d", 
+                              tamaño_actual, bloque['byte_fin'])
+                else:
+                    logger.warning("⚠️ Archivo reducido de tamaño | Original: %d bytes | Actual: %d bytes",
+                                 bloque['byte_fin'], tamaño_actual)
+                
+                ProcesosLogger.finalizar_proceso(
+                    idAuditoria=idAuditoria,
+                    totalLogs=0,
+                    ultimo_byte=tamaño_actual
+                )
+                return
+
+            # 6. Procesamiento de chunk de logs
+            with open(ruta_completa, 'rb') as f:
+                f.seek(bloque['byte_inicio'])
+                chunk = f.read(bloque['byte_fin'] - bloque['byte_inicio'] + 1).decode('utf-8', errors='ignore')
+
+            # 7. Conteo de líneas previas
+            lineas_previas = 0
+            if bloque['byte_inicio'] > 0:
+                with open(ruta_completa, 'rb') as f:
+                    f.seek(0)
+                    lineas_previas = f.read(bloque['byte_inicio']).decode('utf-8', errors='ignore').count('\n')
+
+            # 8. Extracción y procesamiento de bloques
+            bloques_procesados = extraer_bloques_log(chunk, offset_linea=lineas_previas)
+            if not bloques_procesados:
+                logger.warning("ℹ️ No se encontraron bloques procesables en el chunk")
+                ProcesosLogger.marcar_error(idAuditoria)
+                return
+
+            # 9. Generación de reporte
+            reporte = generar_reporte_logs(bloques_procesados, idServidor, idAuditoria)
+            total_logs = sum(datos['count'] for datos in reporte.values())
+
+            # 10. Finalización del proceso y programación de siguiente ejecución
+            proceso = db.session.query(LoProcesos).get(idAuditoria)
+            mantener_activo = proceso.intervaloMinutos > 0 if proceso else False
+
+            ProcesosLogger.finalizar_proceso(
+                idAuditoria=idAuditoria,
+                totalLogs=total_logs,
+                ultimo_byte=bloque['byte_fin'],
+                mantenerActivo=mantener_activo
+            )
+            
+            logger.info("✅ Procesados %d logs | Archivo: %s", total_logs, nombre_archivo)
+
+            # 11. Programar siguiente ejecución si mantener_activo es True
+            if mantener_activo and proceso:
+                intervalo = proceso.intervaloMinutos
+                scheduler.add_job(
+                    procesar_log_en_segundo_plano,
+                    trigger=IntervalTrigger(minutes=intervalo),
+                    args=[nombre_archivo, idServidor, bloque_size, intervalo],
+                    id=f'log_processor_{idAuditoria}',
+                    replace_existing=True
+                )
+                logger.info(f"⏳ Proceso {idAuditoria} programado para reprocesar en {intervalo} minutos")
+
+    except Exception as e:
+        logger.error("🔥 Error procesando %s: %s", nombre_archivo, str(e), exc_info=True)
+        if 'idAuditoria' in locals():
+            with flask_app.app_context():
+                ProcesosLogger.marcar_error(idAuditoria)
+    finally:
+        logger.debug("🏁 Finalizado procesamiento para %s", nombre_archivo)
+
+
+
+--------------------------tablero
+import React, { useState, useEffect, useRef } from 'react';
+import { Doughnut } from 'react-chartjs-2';
+import { Chart, registerables } from 'chart.js';
+import ModalLogs from './ModalLogs';
+import './TableroLogs.css';
+
+Chart.register(...registerables);
+
+const TableroLogs = () => {
+  const [servidores, setServidores] = useState([]);
+  const [metricas, setMetricas] = useState({});
+  const [cargando, setCargando] = useState(true);
+  const [error, setError] = useState(null);
+  const [mostrarModal, setMostrarModal] = useState(false);
+  const [logsSeleccionados, setLogsSeleccionados] = useState([]);
+  const [nivelSeleccionado, setNivelSeleccionado] = useState('');
+  const [servidorNombre, setServidorNombre] = useState('');
+  const websocket = useRef(null);
+
+  // Conexión WebSocket
+  useEffect(() => {
+    const connectWebSocket = () => {
+      websocket.current = new WebSocket('ws://localhost:8000/ws/1'); // Ajusta la URL según tu backend
+
+      websocket.current.onopen = () => {
+        console.log('Conexión WebSocket establecida');
+      };
+
+      // Reemplaza el onmessage actual con este código:
+      websocket.current.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          if (message.eventType === 'metrics_update') {
+            const { idServidor, logs_por_nivel, total_logs } = message.data;
+            
+            setMetricas(prev => {
+              // Conservar todos los datos existentes del servidor
+              const serverData = prev[idServidor]?.resultados?.[0] || {};
+              
+              return {
+                ...prev,
+                [idServidor]: {
+                  resultados: [{
+                    ...serverData,  // Mantiene todas las propiedades existentes
+                    logs_por_nivel: {
+                      ...serverData.logs_por_nivel,  // Conserva niveles previos
+                      ...logs_por_nivel  // Sobrescribe con los nuevos valores
+                    },
+                    total_logs: total_logs
+                  }]
+                }
+              };
+            });
+          }
+        } catch (e) {
+          if (event.data.startsWith('proceso_completado')) {
+            console.log('Notificación de proceso:', event.data);
+          } else {
+            console.error('Error procesando mensaje:', e);
+          }
+        }
+      };
+
+      websocket.current.onerror = (error) => {
+        console.error('Error en WebSocket:', error);
+      };
+
+      websocket.current.onclose = () => {
+        console.log('WebSocket desconectado, reconectando...');
+        setTimeout(connectWebSocket, 5000);
+      };
+    };
+
+    connectWebSocket();
+
+    return () => {
+      if (websocket.current) {
+        websocket.current.close();
+      }
+    };
+  }, []);
+
+  const cargarDatos = async () => {
+    try {
+      setCargando(true);
+      setError(null);
+
+      const resServidores = await fetch('http://localhost:8000/api/servidores/?idEmpresa=1');
+      if (!resServidores.ok) throw new Error('Error al cargar servidores');
+      const dataServidores = await resServidores.json();
+      setServidores(dataServidores.resultados);
+
+      const metricasPromesas = dataServidores.resultados.map(async (servidor) => {
+        const resMetricas = await fetch(
+          `http://localhost:8000/api/servidores/metricas/${servidor.id_servidor}?idEmpresa=1`
+        );
+        return resMetricas.json();
+      });
+
+      const metricasData = await Promise.all(metricasPromesas);
+      const metricasMap = {};
+      metricasData.forEach((m, i) => {
+        metricasMap[dataServidores.resultados[i].id_servidor] = m;
+      });
+      setMetricas(metricasMap);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCargando(false);
+    }
+  };
+
+  useEffect(() => {
+    cargarDatos();
+  }, []);
+
+  const abrirModalConLogs = async (servidor, nivel) => {
+    try {
+      const url = `http://localhost:8000/api/servidores/${servidor.id_servidor}/logs-filtrados/?idEmpresa=1&nivel=${nivel}`;
+      const resLogs = await fetch(url);
+      if (!resLogs.ok) throw new Error('No se pudieron obtener los logs');
+      const dataLogs = await resLogs.json();
+
+      setLogsSeleccionados(dataLogs.resultados || []);
+      setNivelSeleccionado(nivel);
+      setServidorNombre(servidor.nombreServidor);
+      setMostrarModal(true);
+    } catch (error) {
+      console.error(error);
+      alert('Error al cargar logs');
+    }
+  };
+
+  const opcionesGrafico = (servidor, labels) => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: {
+        position: 'right',
+      },
+      tooltip: {
+        callbacks: {
+          label: function (context) {
+            return `${context.label}: ${context.raw}`;
+          },
+        },
+      },
+    },
+    onClick: async (evt, elements) => {
+      if (!elements.length) return;
+      const index = elements[0].index;
+      const nivel = labels[index];
+      await abrirModalConLogs(servidor, nivel);
+    },
+  });
+
+  if (cargando)
+    return (
+      <div className="cargando">
+        <div className="spinner"></div>
+        <p>Cargando dashboard...</p>
+      </div>
+    );
+
+  if (error)
+    return (
+      <div className="error">
+        <p>Error al cargar datos: {error}</p>
+        <button onClick={cargarDatos}>Reintentar</button>
+      </div>
+    );
+
+  return (
+    <div className="tablero-container">
+      <h2>Dashboard de Métricas - Todos los Servidores (Tiempo Real)</h2>
+
+      <div className="servidores-grid">
+        {servidores.map((servidor) => {
+          const datosServidor = metricas[servidor.id_servidor]?.resultados?.[0];
+          if (!datosServidor) return null;
+
+          const ordenNiveles = ['FATAL', 'ERROR', 'WARN', 'INFO', 'DEBUG'];
+          const logsPorNivel = datosServidor.logs_por_nivel || {};
+
+          const niveles = ordenNiveles.filter(
+            (nivel) => logsPorNivel[nivel] !== undefined
+          );
+
+          const coloresMap = {
+            FATAL: '#D32F2F',
+            ERROR: '#FF6384',
+            WARN: '#FFCE56',
+            INFO: '#36A2EB',
+            DEBUG: '#4BC0C0'
+          };
+
+          const valores = niveles.map((nivel) => logsPorNivel[nivel]);
+          const colores = niveles.map((nivel) => coloresMap[nivel]);
+
+          const datosNiveles = {
+            labels: niveles,
+            datasets: [
+              {
+                data: valores,
+                backgroundColor: colores,
+                borderWidth: 1,
+              },
+            ],
+          };
+
+          return (
+            <div key={servidor.id_servidor} className="servidor-card">
+              <h3>{servidor.nombreServidor}</h3>
+              <p className="ruta-servidor">{servidor.ruta}</p>
+
+              <div className="estado-servidor">
+                <span className={`badge ${servidor.activo ? 'activo' : 'inactivo'}`}>
+                  {servidor.activo ? 'ACTIVO' : 'INACTIVO'}
+                </span>
+                <span>Logs: {datosServidor.total_logs}</span>
+              </div>
+
+              <div className="grafica-container">
+                <Doughnut 
+                  data={datosNiveles} 
+                  options={opcionesGrafico(servidor, niveles)} 
+                  updateMode="resize"
+                />
+              </div>
+
+              <div className="metricas-rapidas">
+                <div className="metrica">
+                  <span>Último estado</span>
+                  <strong>{datosServidor.ultimo_proceso?.estado || 'N/A'}</strong>
+                </div>
+                <div className="metrica">
+                  <span>Ocurrencias</span>
+                  <strong>{datosServidor.promedio_ocurrencias?.toFixed(2) || '0'}</strong>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {mostrarModal && (
+        <ModalLogs
+          nivel={nivelSeleccionado}
+          logs={logsSeleccionados}
+          onClose={() => setMostrarModal(false)}
+          servidorNombre={servidorNombre}
+        />
+      )}
+    </div>
+  );
+};
+
+export default TableroLogs;
+
+----------------------------------websocket
+import asyncio
+from fastapi import WebSocket  # Importación crítica que faltaba
+from typing import Dict, Set
+from collections import defaultdict
+import json
+
+class WebSocketManager:
+    def __init__(self):
+        self.active_connections: Dict[int, Set[WebSocket]] = defaultdict(set)
+
+    async def connect(self, websocket: WebSocket, id_empresa: int):
+        await websocket.accept()
+        self.active_connections[id_empresa].add(websocket)
+
+    def disconnect(self, websocket: WebSocket, id_empresa: int):
+        self.active_connections[id_empresa].discard(websocket)
+
+    async def send_personal_message(self, message: str, id_empresa: int):
+        """Para mensajes de texto plano (proceso_completado)"""
+        if id_empresa in self.active_connections:
+            for connection in self.active_connections[id_empresa]:
+                try:
+                    await connection.send_text(message)
+                except Exception as e:
+                    print(f"Error enviando mensaje: {e}")
+                    self.disconnect(connection, id_empresa)
+    
+    async def send_json_message(self, data: dict, id_empresa: int):
+        """Para mensajes JSON (metrics_update)"""
+        if id_empresa in self.active_connections:
+            for connection in self.active_connections[id_empresa]:
+                try:
+                    await connection.send_text(json.dumps(data))
+                except Exception as e:
+                    print(f"Error enviando mensaje JSON: {e}")
+                    self.disconnect(connection, id_empresa)
+
+# Instancia global (manteniendo tu estructura actual)
+manager = WebSocketManager()
+
+--------------logs servidor
+from fastapi import APIRouter, Query, HTTPException
+from datetime import datetime, timedelta
+from typing import Optional, List
+from pydantic import BaseModel  # Para modelos de respuesta
+from modelo.loServidores import loServidores
+from modelo.loLogs import loLogs
+from modelo.loProcesos import LoProcesos
+from config import db, init_app
+from flask import Flask
+from fastapi import Path
+
+# Configuración Flask (necesaria para SQLAlchemy en tu caso)
+flask_app = Flask(__name__)
+init_app(flask_app)
+
+router = APIRouter(
+    prefix="/api/servidores",
+    tags=["Servidores de Logs"],
+    responses={404: {"description": "No encontrado"}}
+)
+
+# Modelo Pydantic para respuesta estructurada
+class ServidorResponse(BaseModel):
+    id_servidor: int
+    nombre: str
+    ruta: str
+    activo: bool
+    fecha_registro: str
+    total_procesos: int
+
+class MetaResponse(BaseModel):
+    total_resultados: int
+    fecha_minima: str
+    parametros: dict
+
+class ServidorListResponse(BaseModel):
+    meta: MetaResponse
+    resultados: List[ServidorResponse]
+
+class MetricaServidorResponse(BaseModel):
+    id_servidor: int
+    nombre_servidor: str
+    ruta: str
+    activo: bool
+    ultimo_proceso: Optional[dict]  # Datos del último proceso (similar a LO_PROCESOS)
+    total_logs: int
+    logs_por_nivel: dict  # Ej: {"INFO": 10, "ERROR": 2}
+    promedio_ocurrencias: float
+
+class MetricasListResponse(BaseModel):
+    meta: MetaResponse  # Reutilizamos tu clase Meta existente
+    resultados: List[MetricaServidorResponse]
+
+# Modelo Pydantic para respuesta de logs filtrados
+class LogFiltradoResponse(BaseModel):
+    id_log: int
+    fecha_creacion: str
+    nivel: str
+    mensaje: str
+    componente: Optional[str]
+    ocurrencias: int
+    lineas: Optional[List[str]] 
+    respuestaOpenai: Optional[str]
+
+class LogsFiltradosListResponse(BaseModel):
+    meta: MetaResponse
+    resultados: List[LogFiltradoResponse]
+
+@router.get("/", response_model=ServidorListResponse)
+def consultar_servidores(
+    idEmpresa: int = Query(..., description="ID de la empresa a filtrar"),
+    dias_atras: int = Query(30, description="Cantidad de días hacia atrás para filtrar"),
+    activo: Optional[bool] = Query(None, description="Filtrar por estado activo/inactivo"),
+    limite: int = Query(100, description="Límite de registros", ge=1, le=1000)
+):
+    try:
+        with flask_app.app_context():
+            fecha_minima = datetime.now() - timedelta(days=dias_atras)
+            
+            query = db.session.query(loServidores).filter(
+                loServidores.idEmpresa == idEmpresa,
+                loServidores.fechaRegistro >= fecha_minima
+            )
+            
+            if activo is not None:
+                query = query.filter(loServidores.activo == activo)
+            
+            servidores = query.order_by(
+                loServidores.fechaRegistro.desc()
+            ).limit(limite).all()
+            
+            return {
+                "meta": {
+                    "total_resultados": len(servidores),
+                    "fecha_minima": fecha_minima.isoformat(),
+                    "parametros": {
+                        "idEmpresa": idEmpresa,
+                        "dias_atras": dias_atras,
+                        "activo": activo,
+                        "limite": limite
+                    }
+                },
+                "resultados": [{
+                    "id_servidor": s.idServidor,
+                    "nombre": s.nombreServidor,
+                    "ruta": s.ruta,
+                    "activo": s.activo,
+                    "fecha_registro": s.fechaRegistro.isoformat(),
+                    "total_procesos": len(s.procesos) if hasattr(s, 'procesos') else 0
+                } for s in servidores]
+            }
+            
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al consultar servidores: {str(e)}"
+        )
+
+# Modelo Pydantic para creación
+class ServidorCreate(BaseModel):
+    idEmpresa: int
+    ruta: str
+    nombreServidor: str
+    activo: bool = False
+
+@router.post("/")
+def crear_servidor(servidor_data: ServidorCreate):
+    try:
+        with flask_app.app_context():
+            # Validar servidor duplicado
+            if db.session.query(loServidores).filter(
+                (loServidores.ruta == servidor_data.ruta) | 
+                (loServidores.nombreServidor == servidor_data.nombreServidor)
+            ).first():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ya existe un servidor con esta ruta o nombre"
+                )
+            
+            nuevo_servidor = loServidores(
+                idEmpresa=servidor_data.idEmpresa,
+                ruta=servidor_data.ruta,
+                nombreServidor=servidor_data.nombreServidor,
+                activo=servidor_data.activo
+            )
+            
+            db.session.add(nuevo_servidor)
+            db.session.commit()
+            
+            return {
+                "id_servidor": nuevo_servidor.idServidor,
+                "mensaje": "Servidor registrado correctamente"
+            }
+            
+    except Exception as e:
+        db.session.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al crear servidor: {str(e)}"
+        )
+
+@router.delete("/{id_servidor}")
+def eliminar_servidor(id_servidor: int = Path(..., description="ID del servidor a eliminar")):
+    with flask_app.app_context():  # ✅ Inicia contexto
+        try:
+            servidor = db.session.query(loServidores).filter_by(idServidor=id_servidor).first()
+
+            if not servidor:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No se encontró el servidor con ID {id_servidor}"
+                )
+
+            db.session.delete(servidor)
+            db.session.commit()
+
+            return {
+                "id_servidor": id_servidor,
+                "mensaje": "Servidor eliminado correctamente"
+            }
+
+        except Exception as e:
+            db.session.rollback()  # ✅ Ahora sí está dentro del contexto
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error al eliminar servidor: {str(e)}"
+            )
+
+@router.get("/metricas/{id_servidor}", response_model=MetricasListResponse)
+def obtener_metricas_servidor(
+    id_servidor: int = Path(..., description="ID del servidor a consultar"),
+    idEmpresa: int = Query(..., description="ID de la empresa"),
+    dias_atras: int = Query(7, description="Rango de días para métricas históricas")
+):
+    try:
+        with flask_app.app_context():
+            # 1. Validar servidor
+            servidor = db.session.query(loServidores).filter_by(
+                idServidor=id_servidor,
+                idEmpresa=idEmpresa
+            ).first()
+            
+            if not servidor:
+                raise HTTPException(status_code=404, detail="Servidor no encontrado")
+
+            # 2. Obtener último proceso
+            ultimo_proceso = db.session.query(LoProcesos).filter_by(
+                idServidor=id_servidor
+            ).order_by(LoProcesos.fechaInicio.desc()).first()
+
+            # 3. Consulta de logs por nivel
+            fecha_limite = datetime.now() - timedelta(days=dias_atras)
+            logs_por_nivel = db.session.query(
+                loLogs.nivel,
+                db.func.count(loLogs.idLogAplicacion)
+            ).filter(
+                loLogs.idServidor == id_servidor,
+                loLogs.fechaCreacion >= fecha_limite
+            ).group_by(loLogs.nivel).all()
+
+            # 4. Estructurar respuesta
+            response_data = {
+                "meta": {
+                    "total_resultados": 1,
+                    "fecha_minima": fecha_limite.isoformat(),
+                    "parametros": {"id_servidor": id_servidor, "dias_atras": dias_atras}
+                },
+                "resultados": [{
+                    "id_servidor": servidor.idServidor,
+                    "nombre_servidor": servidor.nombreServidor,
+                    "ruta": servidor.ruta,
+                    "activo": servidor.activo,
+                    "ultimo_proceso": {
+                        "estado": ultimo_proceso.estado if ultimo_proceso else None,
+                        "logs_procesados": ultimo_proceso.totalLogsProcesados if ultimo_proceso else 0
+                    },
+                    "total_logs": sum(count for _, count in logs_por_nivel),
+                    "logs_por_nivel": {nivel: count for nivel, count in logs_por_nivel},
+                    "promedio_ocurrencias": db.session.query(
+                        db.func.avg(loLogs.ocurrencias)
+                    ).filter(loLogs.idServidor == id_servidor).scalar() or 0
+                }]
+            }
+
+            # ===== NUEVA SECCIÓN =====
+            # Enviar métricas por WebSocket solo si hay logs
+            if any(count > 0 for _, count in logs_por_nivel):
+                from websocket_server import manager
+                import asyncio
+                
+                asyncio.run(manager.send_json_message({
+                    "eventType": "metrics_update",
+                    "data": {
+                        "idServidor": id_servidor,
+                        "logs_por_nivel": {nivel: count for nivel, count in logs_por_nivel},
+                        "total_logs": sum(count for _, count in logs_por_nivel),
+                        "timestamp": datetime.now().isoformat()
+                    }
+                }, id_empresa=idEmpresa))
+            # ===== FIN NUEVA SECCIÓN =====
+
+            return response_data
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al calcular métricas: {str(e)}"
+        )
+
+@router.get("/{id_servidor}/logs-filtrados/", response_model=LogsFiltradosListResponse)
+def obtener_logs_filtrados(
+    id_servidor: int = Path(..., description="ID del servidor a consultar"),
+    idEmpresa: int = Query(..., description="ID de la empresa"),
+    nivel: Optional[str] = Query(None, description="Nivel de log (FATAL, ERROR, WARN, INFO)"),  # Modificado
+    dias_atras: Optional[int] = Query(None, description="Rango de días para filtrar")
+):
+    try:
+        with flask_app.app_context():
+            # Validar servidor
+            servidor = db.session.query(loServidores).filter_by(
+                idServidor=id_servidor,
+                idEmpresa=idEmpresa
+            ).first()
+            
+            if not servidor:
+                raise HTTPException(status_code=404, detail="Servidor no encontrado")
+
+            # Consulta base
+            query = db.session.query(loLogs).filter(
+                loLogs.idServidor == id_servidor
+            )
+
+            # Fecha mínima (usar fecha muy antigua si no viene dias_atras)
+            fecha_minima = datetime.min if dias_atras is None else datetime.now() - timedelta(days=dias_atras)
+            query = query.filter(loLogs.fechaCreacion >= fecha_minima)
+
+            # Validar nivel si viene
+            if nivel:
+                nivel = nivel.upper()
+                if nivel not in ['FATAL', 'ERROR', 'WARN', 'INFO']:  # Modificado
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="Nivel debe ser FATAL, ERROR, WARN o INFO"  # Modificado
+                    )
+                query = query.filter(loLogs.nivel == nivel)
+
+            # Obtener logs
+            logs = query.order_by(loLogs.fechaCreacion.desc()).all()
+
+            return {
+                "meta": {
+                    "total_resultados": len(logs),
+                    "fecha_minima": fecha_minima.isoformat(),
+                    "parametros": {
+                        "id_servidor": id_servidor,
+                        "nivel": nivel,
+                        "dias_atras": dias_atras
+                    }
+                },
+                "resultados": [{
+                    "id_log": log.idLogAplicacion,
+                    "fecha_creacion": log.fechaCreacion.isoformat(),
+                    "nivel": log.nivel,
+                    "mensaje": log.mensaje,
+                    "componente": log.componente,
+                    "ocurrencias": log.ocurrencias,
+                    "lineas": log.lineas,
+                    "respuestaOpenai": log.respuestaOpenai
+                } for log in logs]
+            }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al filtrar logs: {str(e)}"
+        )
