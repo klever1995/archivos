@@ -379,23 +379,20 @@ def procesar_log_en_segundo_plano(nombre_archivo: str, idServidor: int, bloque_s
 
 
 
-
-
-
 -------------------------------------------main_filtro.py
-from fastapi import FastAPI, Form, HTTPException, WebSocket
+from fastapi import FastAPI, BackgroundTasks, Form, HTTPException
+from typing import Optional 
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
-import asyncio
-import uvicorn
+from fastapi import WebSocket
 from websocket_server import manager
+
+import uvicorn
 from servicios import (
-    flask_app, logger,
-    procesar_log_en_segundo_plano,
-    programar_reproceso  # Nueva importación
+    flask_app, logger, proceso_config,
+    procesar_log_en_segundo_plano, ProcesoConfig
 )
 from logs_procesados import router as logs_procesados_router
-from logs_procesos import router as logs_procesos_router
+from logs_procesos import router as logs_procesos_router 
 from logs_servidor import router as servidores_router
 
 app = FastAPI()
@@ -414,26 +411,24 @@ app.include_router(logs_procesados_router)
 app.include_router(logs_procesos_router)
 app.include_router(servidores_router)
 
+# Variables globales
+proceso_activo = False
+procesos_activos_por_archivo = {}  # Nuevo: Para sincronización entre endpoints
+
 @app.post("/proceso-detener/")
-async def detener_proceso(id_proceso: str = Form(...)):
-    """Detiene un proceso específico usando el WebSocketManager"""
-    detenido = await manager.detener_proceso(
-        id_empresa=1,  # O obtener de la sesión
-        id_proceso=id_proceso
-    )
-    return {
-        "status": "proceso_detenido" if detenido else "no_encontrado",
-        "detenido": detenido
-    }
+async def detener_proceso():
+    global proceso_activo
+    proceso_activo = False
+    proceso_config["activo"] = False
+    return {"status": "proceso_detenido", "activo": False}
 
 @app.websocket("/ws/{id_empresa}")
 async def websocket_endpoint(websocket: WebSocket, id_empresa: int):
-    """Endpoint WebSocket para actualizaciones en tiempo real"""
     await manager.connect(websocket, id_empresa)
     try:
         while True:
-            # Mantener conexión activa
-            await websocket.receive_text()
+            data = await websocket.receive_text()
+            # Opcional: Manejar mensajes entrantes del cliente si es necesario
     except Exception as e:
         logger.error(f"Error en WebSocket: {e}")
     finally:
@@ -441,11 +436,7 @@ async def websocket_endpoint(websocket: WebSocket, id_empresa: int):
 
 @app.get("/proceso-config/")
 async def obtener_config():
-    """Obtiene la configuración actual de procesos"""
-    return {
-        "activo": len(manager.procesos_activos) > 0,
-        "procesos_activos": list(manager.procesos_activos.keys())
-    }
+    return {**proceso_config, "activo": proceso_activo}
 
 @app.post("/procesar-log/")
 async def procesar_log(
@@ -454,36 +445,34 @@ async def procesar_log(
     intervalo_minutos: int = Form(...),
     bloque_size: Optional[int] = Form(default=None)
 ):
-    """Inicia el procesamiento de logs con seguimiento en backend"""
-    id_proceso = f"log_{nombre_archivo}_{idServidor}"  # ID único
-    
-    if id_proceso in manager.procesos_activos.get(1, {}):
+    global proceso_activo, procesos_activos_por_archivo, proceso_config
+
+    if nombre_archivo in procesos_activos_por_archivo:
         raise HTTPException(
             status_code=400,
             detail=f"El archivo {nombre_archivo} ya está siendo procesado"
         )
 
-    # Iniciar proceso a través del manager
-    await manager.iniciar_proceso(
-        id_empresa=1,
-        id_proceso=id_proceso,
-        coroutine=procesar_log_en_segundo_plano(
-            nombre_archivo=nombre_archivo,
-            idServidor=idServidor,
-            bloque_size=bloque_size,
-            intervalo_minutos=intervalo_minutos,
-            id_proceso=id_proceso
-        )
+    proceso_activo = True
+    proceso_config["activo"] = True
+    proceso_config["archivo"] = nombre_archivo
+    proceso_config["idServidor"] = idServidor
+    proceso_config["intervalo_minutos"] = intervalo_minutos
+
+    # 👉 CAMBIO: ahora se lanza el proceso en un hilo independiente
+    import threading
+    thread = threading.Thread(
+        target=procesar_log_en_segundo_plano,
+        args=(nombre_archivo, idServidor, bloque_size),
+        daemon=True
     )
+    thread.start()
 
     return {
         "status": "procesamiento_iniciado",
-        "id_proceso": id_proceso,
-        "detalles": {
-            "archivo": nombre_archivo,
-            "intervalo_minutos": intervalo_minutos,
-            "id_servidor": idServidor
-        }
+        "activo": True,
+        "archivo": nombre_archivo,
+        "intervalo_minutos": intervalo_minutos
     }
 
 if __name__ == "__main__":
@@ -494,4 +483,652 @@ if __name__ == "__main__":
 
 
 
+--------------------------------websocket_server.py
+import asyncio
+from fastapi import WebSocket  # Importación crítica que faltaba
+from typing import Dict, Set
+from collections import defaultdict
+import json
+
+class WebSocketManager:
+    def __init__(self):
+        self.active_connections: Dict[int, Set[WebSocket]] = defaultdict(set)
+
+    async def connect(self, websocket: WebSocket, id_empresa: int):
+        await websocket.accept()
+        self.active_connections[id_empresa].add(websocket)
+
+    def disconnect(self, websocket: WebSocket, id_empresa: int):
+        self.active_connections[id_empresa].discard(websocket)
+
+    async def send_personal_message(self, message: str, id_empresa: int):
+        """Para mensajes de texto plano (proceso_completado)"""
+        if id_empresa in self.active_connections:
+            for connection in self.active_connections[id_empresa]:
+                try:
+                    await connection.send_text(message)
+                except Exception as e:
+                    print(f"Error enviando mensaje: {e}")
+                    self.disconnect(connection, id_empresa)
+    
+    async def send_json_message(self, data: dict, id_empresa: int):
+        """Para mensajes JSON (metrics_update)"""
+        if id_empresa in self.active_connections:
+            for connection in self.active_connections[id_empresa]:
+                try:
+                    await connection.send_text(json.dumps(data))
+                except Exception as e:
+                    print(f"Error enviando mensaje JSON: {e}")
+                    self.disconnect(connection, id_empresa)
+
+# Instancia global (manteniendo tu estructura actual)
+manager = WebSocketManager()
+
+
+
 ----------------------------------metodos_loprocesos.py
+import sys
+import os
+import hashlib
+import asyncio
+from flask import Flask
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from config import init_app, db 
+from typing import Optional, Dict, Union
+from modelo.loProcesos import LoProcesos
+from websocket_server import manager
+import logging
+from datetime import datetime
+
+app = Flask(__name__)
+init_app(app)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
+class ProcesosLogger:
+
+    @staticmethod
+    def iniciar_proceso(
+        idEmpresa: int,
+        operador: int,
+        idServidor: int = None,
+        procesoActivo: bool = False,  # Nuevo parámetro
+        intervaloMinutos: int = 5     # Nuevo parámetro
+    ) -> int:
+        """Registra el inicio de un nuevo proceso, ahora con soporte para ejecución periódica."""
+        with app.app_context():
+            try:
+                nuevo_proceso = LoProcesos(
+                    idEmpresa=idEmpresa,
+                    operador=operador,
+                    idServidor=idServidor,
+                    fechaInicio=datetime.now(),
+                    totalLogsProcesados=0,
+                    estado='PROCESANDO',
+                    procesoActivo=procesoActivo,      # Nuevo campo
+                    intervaloMinutos=intervaloMinutos # Nuevo campo
+                )
+                db.session.add(nuevo_proceso)
+                db.session.commit()
+                logger.info(f"✅ Proceso {nuevo_proceso.idAuditoria} iniciado (Activo: {procesoActivo}, Intervalo: {intervaloMinutos} min)")
+                return nuevo_proceso.idAuditoria
+            except Exception as e:
+                db.session.rollback()
+                logger.error(f"❌ Error al iniciar proceso: {str(e)}", exc_info=True)
+                return -1
+
+    @staticmethod
+    def finalizar_proceso(idAuditoria: int, totalLogs: int, ultimo_byte: int, mantenerActivo: bool = False) -> bool:
+        with app.app_context():
+            try:
+                proceso = LoProcesos.query.get(idAuditoria)
+                if proceso:
+                    proceso.fechaFin = datetime.now()
+                    proceso.totalLogsProcesados = totalLogs
+                    proceso.ultimo_byte_procesado = ultimo_byte
+                    proceso.estado = 'COMPLETADO'
+                    proceso.procesoActivo = mantenerActivo
+                    db.session.commit()
+
+                    # Notificación WebSocket (COMPATIBLE CON TU CÓDIGO EXISTENTE)
+                    try:
+                        if hasattr(manager, 'send_personal_message'):  # Verificación segura
+                            asyncio.run(manager.send_personal_message(
+                                f"proceso_completado:{idAuditoria}",
+                                proceso.idEmpresa
+                            ))
+                        else:
+                            logger.warning("WebSocketManager no tiene send_personal_message")
+                    except Exception as ws_error:
+                        logger.error(f"Error en WebSocket: {str(ws_error)}")
+
+                    logger.info(f"✅ Proceso {idAuditoria} finalizado. Notificación WebSocket enviada.")
+                    return True
+                return False
+            except Exception as e:
+                db.session.rollback()
+                logger.error(f"❌ Error al finalizar proceso {idAuditoria}: {str(e)}", exc_info=True)
+                return False
+            
+    @staticmethod
+    def obtener_procesos_activos() -> list:
+        """Reemplaza el diccionario global procesos_activos_por_archivo."""
+        with app.app_context():
+            try:
+                return db.session.query(LoProcesos).filter(
+                    LoProcesos.procesoActivo == True,
+                    LoProcesos.estado.in_(['PROCESANDO', 'COMPLETADO'])
+                ).all()
+            except Exception as e:
+                logger.error(f"❌ Error obteniendo procesos activos: {str(e)}")
+                return []
+
+    @staticmethod
+    def calcular_checksum(ruta_archivo: str) -> str:
+        """Genera SHA-256 del archivo."""
+        hash_sha256 = hashlib.sha256()
+        with open(ruta_archivo, 'rb') as f:
+            for chunk in iter(lambda: f.read(4096), b''):
+                hash_sha256.update(chunk)
+        return hash_sha256.hexdigest()
+
+    @staticmethod
+    def reservar_bloque(
+        ruta_archivo: str,
+        idEmpresa: int,
+        operador: int,
+        idServidor: int = None,
+        bloque_size: int = None,
+        forzar_completo: bool = False,
+        intervaloMinutos: int = 5  # Parámetro agregado para intervalo
+    ) -> Optional[Dict[str, Union[int, str]]]:
+        with app.app_context():
+            try:
+                if not os.path.exists(ruta_archivo):
+                    logger.error(f"Archivo no encontrado: {ruta_archivo}")
+                    return None
+
+                checksum = ProcesosLogger.calcular_checksum(ruta_archivo)
+                tamano_archivo = os.path.getsize(ruta_archivo)
+
+                # Procesamiento completo para archivos pequeños o forzados
+                if forzar_completo or tamano_archivo < 1024:
+                    ultimo_proceso = db.session.query(LoProcesos).filter(
+                        LoProcesos.archivo == ruta_archivo,
+                        LoProcesos.estado.in_(['COMPLETADO', 'PROCESANDO']),
+                        LoProcesos.idServidor == (idServidor if idServidor else LoProcesos.idServidor)
+                    ).order_by(LoProcesos.byte_fin.desc()).first()
+
+                    if ultimo_proceso and ultimo_proceso.byte_fin >= tamano_archivo:
+                        logger.info("Archivo ya procesado completamente")
+                        return None
+
+                    nuevo_proceso = LoProcesos(
+                        idEmpresa=idEmpresa,
+                        operador=operador,
+                        idServidor=idServidor,
+                        archivo=ruta_archivo,
+                        byte_inicio=0,
+                        byte_fin=tamano_archivo,
+                        estado='PROCESANDO',
+                        checksum=checksum,
+                        bloque_size=tamano_archivo,
+                        fechaInicio=datetime.now(),
+                        intervaloMinutos=intervaloMinutos  # Guardar intervalo aquí
+                    )
+                    db.session.add(nuevo_proceso)
+                    db.session.commit()
+                    return {
+                        'idAuditoria': nuevo_proceso.idAuditoria,
+                        'byte_inicio': 0,
+                        'byte_fin': tamano_archivo,
+                        'bloque_size': tamano_archivo
+                    }
+
+                # Procesamiento por bloques
+                bloque_size = bloque_size or 10485760  # 10MB por defecto
+                ultimo_proceso = db.session.query(LoProcesos).filter(
+                    LoProcesos.archivo == ruta_archivo,
+                    LoProcesos.estado.in_(['COMPLETADO', 'PROCESANDO']),
+                    LoProcesos.idServidor == (idServidor if idServidor else LoProcesos.idServidor)
+                ).with_for_update().order_by(LoProcesos.byte_fin.desc()).first()
+
+                byte_inicio = ultimo_proceso.byte_fin + 1 if ultimo_proceso else 0
+
+                # Registrar incluso si no hay crecimiento
+                if byte_inicio >= tamano_archivo:
+                    nuevo_proceso = LoProcesos(
+                        idEmpresa=idEmpresa,
+                        operador=operador,
+                        idServidor=idServidor,
+                        archivo=ruta_archivo,
+                        byte_inicio=ultimo_proceso.byte_fin if ultimo_proceso else 0,
+                        byte_fin=tamano_archivo,
+                        estado='COMPLETADO',
+                        checksum=checksum,
+                        bloque_size=0,
+                        fechaInicio=datetime.now(),
+                        fechaFin=datetime.now(),
+                        totalLogsProcesados=0,
+                        intervaloMinutos=intervaloMinutos  # Guardar intervalo aquí también
+                    )
+                    db.session.add(nuevo_proceso)
+                    db.session.commit()
+                    logger.info("Registro creado para archivo sin cambios")
+                    return {
+                        'idAuditoria': nuevo_proceso.idAuditoria,
+                        'byte_inicio': nuevo_proceso.byte_inicio,
+                        'byte_fin': nuevo_proceso.byte_fin,
+                        'bloque_size': 0
+                    }
+
+                byte_fin = min(byte_inicio + bloque_size - 1, tamano_archivo)
+
+                # Si queda menos de 1MB, procesar hasta el final
+                if (tamano_archivo - byte_fin) < 1048576:
+                    byte_fin = tamano_archivo - 1
+
+                nuevo_proceso = LoProcesos(
+                    idEmpresa=idEmpresa,
+                    operador=operador,
+                    idServidor=idServidor,
+                    archivo=ruta_archivo,
+                    byte_inicio=byte_inicio,
+                    byte_fin=byte_fin,
+                    estado='PROCESANDO',
+                    checksum=checksum,
+                    bloque_size=bloque_size,
+                    fechaInicio=datetime.now(),
+                    intervaloMinutos=intervaloMinutos  # Guardar intervalo aquí
+                )
+                db.session.add(nuevo_proceso)
+                db.session.commit()
+                return {
+                    'idAuditoria': nuevo_proceso.idAuditoria,
+                    'byte_inicio': byte_inicio,
+                    'byte_fin': byte_fin,
+                    'bloque_size': bloque_size
+                }
+
+            except Exception as e:
+                db.session.rollback()
+                logger.error(f"Error al reservar bloque: {str(e)}")
+                return None
+
+
+    @staticmethod
+    def marcar_error(idAuditoria: int):
+        """Marca un proceso como fallido."""
+        with app.app_context():
+            proceso = LoProcesos.query.get(idAuditoria)
+            if proceso:
+                proceso.estado = 'FALLIDO'
+                db.session.commit()
+
+    @staticmethod
+    def obtener_ultimo_byte_procesado(ruta_archivo: str, idServidor: int = None) -> int:
+        """Obtiene el último byte procesado para un archivo (y servidor, si se especifica)."""
+        with app.app_context():
+            try:
+                query = db.session.query(LoProcesos).filter(
+                    LoProcesos.archivo == ruta_archivo,
+                    LoProcesos.estado == 'COMPLETADO'
+                )
+                if idServidor:
+                    query = query.filter(LoProcesos.idServidor == idServidor)
+
+                ultimo_proceso = query.order_by(LoProcesos.byte_fin.desc()).first()
+                return ultimo_proceso.byte_fin if ultimo_proceso else 0
+            except Exception as e:
+                print(f"❌ Error obteniendo último byte: {e}")
+                return 0
+
+
+
+
+
+
+
+------------------------------------------------------logs_servidor.py
+from fastapi import APIRouter, Query, HTTPException
+from datetime import datetime, timedelta
+from typing import Optional, List
+from pydantic import BaseModel  # Para modelos de respuesta
+from modelo.loServidores import loServidores
+from modelo.loLogs import loLogs
+from modelo.loProcesos import LoProcesos
+from config import db, init_app
+from flask import Flask
+from fastapi import Path
+
+# Configuración Flask (necesaria para SQLAlchemy en tu caso)
+flask_app = Flask(__name__)
+init_app(flask_app)
+
+router = APIRouter(
+    prefix="/api/servidores",
+    tags=["Servidores de Logs"],
+    responses={404: {"description": "No encontrado"}}
+)
+
+# Modelo Pydantic para respuesta estructurada
+class ServidorResponse(BaseModel):
+    id_servidor: int
+    nombre: str
+    ruta: str
+    activo: bool
+    fecha_registro: str
+    total_procesos: int
+
+class MetaResponse(BaseModel):
+    total_resultados: int
+    fecha_minima: str
+    parametros: dict
+
+class ServidorListResponse(BaseModel):
+    meta: MetaResponse
+    resultados: List[ServidorResponse]
+
+class MetricaServidorResponse(BaseModel):
+    id_servidor: int
+    nombre_servidor: str
+    ruta: str
+    activo: bool
+    ultimo_proceso: Optional[dict]  # Datos del último proceso (similar a LO_PROCESOS)
+    total_logs: int
+    logs_por_nivel: dict  # Ej: {"INFO": 10, "ERROR": 2}
+    promedio_ocurrencias: float
+
+class MetricasListResponse(BaseModel):
+    meta: MetaResponse  # Reutilizamos tu clase Meta existente
+    resultados: List[MetricaServidorResponse]
+
+# Modelo Pydantic para respuesta de logs filtrados
+class LogFiltradoResponse(BaseModel):
+    id_log: int
+    fecha_creacion: str
+    nivel: str
+    mensaje: str
+    componente: Optional[str]
+    ocurrencias: int
+    lineas: Optional[List[str]] 
+    respuestaOpenai: Optional[str]
+
+class LogsFiltradosListResponse(BaseModel):
+    meta: MetaResponse
+    resultados: List[LogFiltradoResponse]
+
+@router.get("/", response_model=ServidorListResponse)
+def consultar_servidores(
+    idEmpresa: int = Query(..., description="ID de la empresa a filtrar"),
+    dias_atras: int = Query(30, description="Cantidad de días hacia atrás para filtrar"),
+    activo: Optional[bool] = Query(None, description="Filtrar por estado activo/inactivo"),
+    limite: int = Query(100, description="Límite de registros", ge=1, le=1000)
+):
+    try:
+        with flask_app.app_context():
+            fecha_minima = datetime.now() - timedelta(days=dias_atras)
+            
+            query = db.session.query(loServidores).filter(
+                loServidores.idEmpresa == idEmpresa,
+                loServidores.fechaRegistro >= fecha_minima
+            )
+            
+            if activo is not None:
+                query = query.filter(loServidores.activo == activo)
+            
+            servidores = query.order_by(
+                loServidores.fechaRegistro.desc()
+            ).limit(limite).all()
+            
+            return {
+                "meta": {
+                    "total_resultados": len(servidores),
+                    "fecha_minima": fecha_minima.isoformat(),
+                    "parametros": {
+                        "idEmpresa": idEmpresa,
+                        "dias_atras": dias_atras,
+                        "activo": activo,
+                        "limite": limite
+                    }
+                },
+                "resultados": [{
+                    "id_servidor": s.idServidor,
+                    "nombre": s.nombreServidor,
+                    "ruta": s.ruta,
+                    "activo": s.activo,
+                    "fecha_registro": s.fechaRegistro.isoformat(),
+                    "total_procesos": len(s.procesos) if hasattr(s, 'procesos') else 0
+                } for s in servidores]
+            }
+            
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al consultar servidores: {str(e)}"
+        )
+
+# Modelo Pydantic para creación
+class ServidorCreate(BaseModel):
+    idEmpresa: int
+    ruta: str
+    nombreServidor: str
+    activo: bool = False
+
+@router.post("/")
+def crear_servidor(servidor_data: ServidorCreate):
+    try:
+        with flask_app.app_context():
+            # Validar servidor duplicado
+            if db.session.query(loServidores).filter(
+                (loServidores.ruta == servidor_data.ruta) | 
+                (loServidores.nombreServidor == servidor_data.nombreServidor)
+            ).first():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ya existe un servidor con esta ruta o nombre"
+                )
+            
+            nuevo_servidor = loServidores(
+                idEmpresa=servidor_data.idEmpresa,
+                ruta=servidor_data.ruta,
+                nombreServidor=servidor_data.nombreServidor,
+                activo=servidor_data.activo
+            )
+            
+            db.session.add(nuevo_servidor)
+            db.session.commit()
+            
+            return {
+                "id_servidor": nuevo_servidor.idServidor,
+                "mensaje": "Servidor registrado correctamente"
+            }
+            
+    except Exception as e:
+        db.session.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al crear servidor: {str(e)}"
+        )
+
+@router.delete("/{id_servidor}")
+def eliminar_servidor(id_servidor: int = Path(..., description="ID del servidor a eliminar")):
+    with flask_app.app_context():  # ✅ Inicia contexto
+        try:
+            servidor = db.session.query(loServidores).filter_by(idServidor=id_servidor).first()
+
+            if not servidor:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No se encontró el servidor con ID {id_servidor}"
+                )
+
+            db.session.delete(servidor)
+            db.session.commit()
+
+            return {
+                "id_servidor": id_servidor,
+                "mensaje": "Servidor eliminado correctamente"
+            }
+
+        except Exception as e:
+            db.session.rollback()  # ✅ Ahora sí está dentro del contexto
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error al eliminar servidor: {str(e)}"
+            )
+
+@router.get("/metricas/{id_servidor}", response_model=MetricasListResponse)
+def obtener_metricas_servidor(
+    id_servidor: int = Path(..., description="ID del servidor a consultar"),
+    idEmpresa: int = Query(..., description="ID de la empresa"),
+    dias_atras: int = Query(7, description="Rango de días para métricas históricas")
+):
+    try:
+        with flask_app.app_context():
+            # 1. Validar servidor
+            servidor = db.session.query(loServidores).filter_by(
+                idServidor=id_servidor,
+                idEmpresa=idEmpresa
+            ).first()
+            
+            if not servidor:
+                raise HTTPException(status_code=404, detail="Servidor no encontrado")
+
+            # 2. Obtener último proceso
+            ultimo_proceso = db.session.query(LoProcesos).filter_by(
+                idServidor=id_servidor
+            ).order_by(LoProcesos.fechaInicio.desc()).first()
+
+            # 3. Consulta de logs por nivel
+            fecha_limite = datetime.now() - timedelta(days=dias_atras)
+            logs_por_nivel = db.session.query(
+                loLogs.nivel,
+                db.func.count(loLogs.idLogAplicacion)
+            ).filter(
+                loLogs.idServidor == id_servidor,
+                loLogs.fechaCreacion >= fecha_limite
+            ).group_by(loLogs.nivel).all()
+
+            # 4. Estructurar respuesta
+            response_data = {
+                "meta": {
+                    "total_resultados": 1,
+                    "fecha_minima": fecha_limite.isoformat(),
+                    "parametros": {"id_servidor": id_servidor, "dias_atras": dias_atras}
+                },
+                "resultados": [{
+                    "id_servidor": servidor.idServidor,
+                    "nombre_servidor": servidor.nombreServidor,
+                    "ruta": servidor.ruta,
+                    "activo": servidor.activo,
+                    "ultimo_proceso": {
+                        "estado": ultimo_proceso.estado if ultimo_proceso else None,
+                        "logs_procesados": ultimo_proceso.totalLogsProcesados if ultimo_proceso else 0
+                    },
+                    "total_logs": sum(count for _, count in logs_por_nivel),
+                    "logs_por_nivel": {nivel: count for nivel, count in logs_por_nivel},
+                    "promedio_ocurrencias": db.session.query(
+                        db.func.avg(loLogs.ocurrencias)
+                    ).filter(loLogs.idServidor == id_servidor).scalar() or 0
+                }]
+            }
+
+            # ===== NUEVA SECCIÓN =====
+            # Enviar métricas por WebSocket solo si hay logs
+            if any(count > 0 for _, count in logs_por_nivel):
+                from websocket_server import manager
+                import asyncio
+                
+                asyncio.run(manager.send_json_message({
+                    "eventType": "metrics_update",
+                    "data": {
+                        "idServidor": id_servidor,
+                        "logs_por_nivel": {nivel: count for nivel, count in logs_por_nivel},
+                        "total_logs": sum(count for _, count in logs_por_nivel),
+                        "timestamp": datetime.now().isoformat()
+                    }
+                }, id_empresa=idEmpresa))
+            # ===== FIN NUEVA SECCIÓN =====
+
+            return response_data
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al calcular métricas: {str(e)}"
+        )
+
+@router.get("/{id_servidor}/logs-filtrados/", response_model=LogsFiltradosListResponse)
+def obtener_logs_filtrados(
+    id_servidor: int = Path(..., description="ID del servidor a consultar"),
+    idEmpresa: int = Query(..., description="ID de la empresa"),
+    nivel: Optional[str] = Query(None, description="Nivel de log (FATAL, ERROR, WARN, INFO)"),  # Modificado
+    dias_atras: Optional[int] = Query(None, description="Rango de días para filtrar")
+):
+    try:
+        with flask_app.app_context():
+            # Validar servidor
+            servidor = db.session.query(loServidores).filter_by(
+                idServidor=id_servidor,
+                idEmpresa=idEmpresa
+            ).first()
+            
+            if not servidor:
+                raise HTTPException(status_code=404, detail="Servidor no encontrado")
+
+            # Consulta base
+            query = db.session.query(loLogs).filter(
+                loLogs.idServidor == id_servidor
+            )
+
+            # Fecha mínima (usar fecha muy antigua si no viene dias_atras)
+            fecha_minima = datetime.min if dias_atras is None else datetime.now() - timedelta(days=dias_atras)
+            query = query.filter(loLogs.fechaCreacion >= fecha_minima)
+
+            # Validar nivel si viene
+            if nivel:
+                nivel = nivel.upper()
+                if nivel not in ['FATAL', 'ERROR', 'WARN', 'INFO']:  # Modificado
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="Nivel debe ser FATAL, ERROR, WARN o INFO"  # Modificado
+                    )
+                query = query.filter(loLogs.nivel == nivel)
+
+            # Obtener logs
+            logs = query.order_by(loLogs.fechaCreacion.desc()).all()
+
+            return {
+                "meta": {
+                    "total_resultados": len(logs),
+                    "fecha_minima": fecha_minima.isoformat(),
+                    "parametros": {
+                        "id_servidor": id_servidor,
+                        "nivel": nivel,
+                        "dias_atras": dias_atras
+                    }
+                },
+                "resultados": [{
+                    "id_log": log.idLogAplicacion,
+                    "fecha_creacion": log.fechaCreacion.isoformat(),
+                    "nivel": log.nivel,
+                    "mensaje": log.mensaje,
+                    "componente": log.componente,
+                    "ocurrencias": log.ocurrencias,
+                    "lineas": log.lineas,
+                    "respuestaOpenai": log.respuestaOpenai
+                } for log in logs]
+            }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al filtrar logs: {str(e)}"
+        )
