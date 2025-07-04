@@ -1,0 +1,718 @@
+----------------------------------loogs_servidor.py
+from fastapi import APIRouter, Query, HTTPException
+from datetime import datetime, timedelta
+from typing import Optional, List
+from pydantic import BaseModel  # Para modelos de respuesta
+from modelo.loServidores import loServidores
+from modelo.loLogs import loLogs
+from modelo.loProcesos import LoProcesos
+from config import db, init_app
+from flask import Flask
+from fastapi import Path
+
+# Configuración Flask (necesaria para SQLAlchemy en tu caso)
+flask_app = Flask(__name__)
+init_app(flask_app)
+
+router = APIRouter(
+    prefix="/api/servidores",
+    tags=["Servidores de Logs"],
+    responses={404: {"description": "No encontrado"}}
+)
+
+# Modelo Pydantic para respuesta estructurada
+class ServidorResponse(BaseModel):
+    id_servidor: int
+    nombre: str
+    ruta: str
+    activo: bool
+    fecha_registro: str
+    total_procesos: int
+
+class MetaResponse(BaseModel):
+    total_resultados: int
+    fecha_minima: str
+    parametros: dict
+
+class ServidorListResponse(BaseModel):
+    meta: MetaResponse
+    resultados: List[ServidorResponse]
+
+class MetricaServidorResponse(BaseModel):
+    id_servidor: int
+    nombre_servidor: str
+    ruta: str
+    activo: bool
+    ultimo_proceso: Optional[dict]  # Datos del último proceso (similar a LO_PROCESOS)
+    total_logs: int
+    logs_por_nivel: dict  # Ej: {"INFO": 10, "ERROR": 2}
+    promedio_ocurrencias: float
+
+class MetricasListResponse(BaseModel):
+    meta: MetaResponse  # Reutilizamos tu clase Meta existente
+    resultados: List[MetricaServidorResponse]
+
+# Modelo Pydantic para respuesta de logs filtrados
+class LogFiltradoResponse(BaseModel):
+    id_log: int
+    fecha_creacion: str
+    nivel: str
+    mensaje: str
+    componente: Optional[str]
+    ocurrencias: int
+    lineas: Optional[List[str]] 
+    respuestaOpenai: Optional[str]
+
+class LogsFiltradosListResponse(BaseModel):
+    meta: MetaResponse
+    resultados: List[LogFiltradoResponse]
+
+class EvolucionErroresResponse(BaseModel):
+    id_servidor: int
+    nombre_servidor: str
+    datos: List[dict]
+
+@router.get("/", response_model=ServidorListResponse)
+def consultar_servidores(
+    idEmpresa: int = Query(..., description="ID de la empresa a filtrar"),
+    dias_atras: int = Query(30, description="Cantidad de días hacia atrás para filtrar"),
+    activo: Optional[bool] = Query(None, description="Filtrar por estado activo/inactivo"),
+    limite: int = Query(100, description="Límite de registros", ge=1, le=1000)
+):
+    try:
+        with flask_app.app_context():
+            fecha_minima = datetime.now() - timedelta(days=dias_atras)
+            
+            query = db.session.query(loServidores).filter(
+                loServidores.idEmpresa == idEmpresa,
+                loServidores.fechaRegistro >= fecha_minima
+            )
+            
+            if activo is not None:
+                query = query.filter(loServidores.activo == activo)
+            
+            servidores = query.order_by(
+                loServidores.fechaRegistro.desc()
+            ).limit(limite).all()
+            
+            return {
+                "meta": {
+                    "total_resultados": len(servidores),
+                    "fecha_minima": fecha_minima.isoformat(),
+                    "parametros": {
+                        "idEmpresa": idEmpresa,
+                        "dias_atras": dias_atras,
+                        "activo": activo,
+                        "limite": limite
+                    }
+                },
+                "resultados": [{
+                    "id_servidor": s.idServidor,
+                    "nombre": s.nombreServidor,
+                    "ruta": s.ruta,
+                    "activo": s.activo,
+                    "fecha_registro": s.fechaRegistro.isoformat(),
+                    "total_procesos": len(s.procesos) if hasattr(s, 'procesos') else 0
+                } for s in servidores]
+            }
+            
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al consultar servidores: {str(e)}"
+        )
+
+# Modelo Pydantic para creación
+class ServidorCreate(BaseModel):
+    idEmpresa: int
+    ruta: str
+    nombreServidor: str
+    activo: bool = False
+
+@router.post("/")
+def crear_servidor(servidor_data: ServidorCreate):
+    try:
+        with flask_app.app_context():
+            # Validar servidor duplicado
+            if db.session.query(loServidores).filter(
+                (loServidores.ruta == servidor_data.ruta) | 
+                (loServidores.nombreServidor == servidor_data.nombreServidor)
+            ).first():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ya existe un servidor con esta ruta o nombre"
+                )
+            
+            nuevo_servidor = loServidores(
+                idEmpresa=servidor_data.idEmpresa,
+                ruta=servidor_data.ruta,
+                nombreServidor=servidor_data.nombreServidor,
+                activo=servidor_data.activo
+            )
+            
+            db.session.add(nuevo_servidor)
+            db.session.commit()
+            
+            return {
+                "id_servidor": nuevo_servidor.idServidor,
+                "mensaje": "Servidor registrado correctamente"
+            }
+            
+    except Exception as e:
+        db.session.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al crear servidor: {str(e)}"
+        )
+
+@router.delete("/{id_servidor}")
+def eliminar_servidor(id_servidor: int = Path(..., description="ID del servidor a eliminar")):
+    with flask_app.app_context():  # ✅ Inicia contexto
+        try:
+            servidor = db.session.query(loServidores).filter_by(idServidor=id_servidor).first()
+
+            if not servidor:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No se encontró el servidor con ID {id_servidor}"
+                )
+
+            db.session.delete(servidor)
+            db.session.commit()
+
+            return {
+                "id_servidor": id_servidor,
+                "mensaje": "Servidor eliminado correctamente"
+            }
+
+        except Exception as e:
+            db.session.rollback()  # ✅ Ahora sí está dentro del contexto
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error al eliminar servidor: {str(e)}"
+            )
+
+@router.get("/metricas/{id_servidor}", response_model=MetricasListResponse)
+def obtener_metricas_servidor(
+    id_servidor: int = Path(..., description="ID del servidor a consultar"),
+    idEmpresa: int = Query(..., description="ID de la empresa"),
+    dias_atras: int = Query(100, description="Rango de días para métricas históricas")
+):
+    try:
+        with flask_app.app_context():
+            # 1. Validar servidor
+            servidor = db.session.query(loServidores).filter_by(
+                idServidor=id_servidor,
+                idEmpresa=idEmpresa
+            ).first()
+            
+            if not servidor:
+                raise HTTPException(status_code=404, detail="Servidor no encontrado")
+
+            # 2. Obtener último proceso
+            ultimo_proceso = db.session.query(LoProcesos).filter_by(
+                idServidor=id_servidor
+            ).order_by(LoProcesos.fechaInicio.desc()).first()
+
+            # 3. Consulta de logs por nivel
+            fecha_limite = datetime.now() - timedelta(days=dias_atras)
+            logs_por_nivel = db.session.query(
+                loLogs.nivel,
+                db.func.count(loLogs.idLogAplicacion)
+            ).filter(
+                loLogs.idServidor == id_servidor,
+                loLogs.fechaCreacion >= fecha_limite
+            ).group_by(loLogs.nivel).all()
+
+            # 4. Estructurar respuesta
+            response_data = {
+                "meta": {
+                    "total_resultados": 1,
+                    "fecha_minima": fecha_limite.isoformat(),
+                    "parametros": {"id_servidor": id_servidor, "dias_atras": dias_atras}
+                },
+                "resultados": [{
+                    "id_servidor": servidor.idServidor,
+                    "nombre_servidor": servidor.nombreServidor,
+                    "ruta": servidor.ruta,
+                    "activo": servidor.activo,
+                    "ultimo_proceso": {
+                        "estado": ultimo_proceso.estado if ultimo_proceso else None,
+                        "logs_procesados": ultimo_proceso.totalLogsProcesados if ultimo_proceso else 0
+                    },
+                    "total_logs": sum(count for _, count in logs_por_nivel),
+                    "logs_por_nivel": {nivel: count for nivel, count in logs_por_nivel},
+                    "promedio_ocurrencias": db.session.query(
+                        db.func.avg(loLogs.ocurrencias)
+                    ).filter(loLogs.idServidor == id_servidor).scalar() or 0
+                }]
+            }
+
+            # ===== NUEVA SECCIÓN =====
+            # Enviar métricas por WebSocket solo si hay logs
+            if any(count > 0 for _, count in logs_por_nivel):
+                from websocket_server import manager
+                import asyncio
+                
+                asyncio.run(manager.send_json_message({
+                    "eventType": "metrics_update",
+                    "data": {
+                        "idServidor": id_servidor,
+                        "logs_por_nivel": {nivel: count for nivel, count in logs_por_nivel},
+                        "total_logs": sum(count for _, count in logs_por_nivel),
+                        "timestamp": datetime.now().isoformat()
+                    }
+                }, id_empresa=idEmpresa))
+            # ===== FIN NUEVA SECCIÓN =====
+
+            return response_data
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al calcular métricas: {str(e)}"
+        )
+
+@router.get("/{id_servidor}/logs-filtrados/", response_model=LogsFiltradosListResponse)
+def obtener_logs_filtrados(
+    id_servidor: int = Path(..., description="ID del servidor a consultar"),
+    idEmpresa: int = Query(..., description="ID de la empresa"),
+    nivel: Optional[str] = Query(None, description="Nivel de log (FATAL, ERROR, WARN, INFO)"),  # Modificado
+    dias_atras: Optional[int] = Query(None, description="Rango de días para filtrar")
+):
+    try:
+        with flask_app.app_context():
+            # Validar servidor
+            servidor = db.session.query(loServidores).filter_by(
+                idServidor=id_servidor,
+                idEmpresa=idEmpresa
+            ).first()
+            
+            if not servidor:
+                raise HTTPException(status_code=404, detail="Servidor no encontrado")
+
+            # Consulta base
+            query = db.session.query(loLogs).filter(
+                loLogs.idServidor == id_servidor
+            )
+
+            # Fecha mínima (usar fecha muy antigua si no viene dias_atras)
+            fecha_minima = datetime.min if dias_atras is None else datetime.now() - timedelta(days=dias_atras)
+            query = query.filter(loLogs.fechaCreacion >= fecha_minima)
+
+            # Validar nivel si viene
+            if nivel:
+                nivel = nivel.upper()
+                if nivel not in ['FATAL', 'ERROR', 'WARN', 'INFO']:  # Modificado
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="Nivel debe ser FATAL, ERROR, WARN o INFO"  # Modificado
+                    )
+                query = query.filter(loLogs.nivel == nivel)
+
+            # Obtener logs
+            logs = query.order_by(loLogs.fechaCreacion.desc()).all()
+
+            return {
+                "meta": {
+                    "total_resultados": len(logs),
+                    "fecha_minima": fecha_minima.isoformat(),
+                    "parametros": {
+                        "id_servidor": id_servidor,
+                        "nivel": nivel,
+                        "dias_atras": dias_atras
+                    }
+                },
+                "resultados": [{
+                    "id_log": log.idLogAplicacion,
+                    "fecha_creacion": log.fechaCreacion.isoformat(),
+                    "nivel": log.nivel,
+                    "mensaje": log.mensaje,
+                    "componente": log.componente,
+                    "ocurrencias": log.ocurrencias,
+                    "lineas": log.lineas,
+                    "respuestaOpenai": log.respuestaOpenai
+                } for log in logs]
+            }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al filtrar logs: {str(e)}"
+        )
+
+@router.get("/{id_servidor}/evolucion-errores/", response_model=EvolucionErroresResponse)
+def obtener_evolucion_errores(
+    id_servidor: int = Path(..., description="ID del servidor a consultar"),
+    idEmpresa: int = Query(..., description="ID de la empresa"),
+    agrupacion: str = Query("por_proceso", description="Agrupación por 'proceso' o 'dia'")
+):
+    try:
+        with flask_app.app_context():
+            # 1. Validar servidor
+            servidor = db.session.query(loServidores).filter_by(
+                idServidor=id_servidor,
+                idEmpresa=idEmpresa
+            ).first()
+            
+            if not servidor:
+                raise HTTPException(status_code=404, detail="Servidor no encontrado")
+
+            # 2. Consultar procesos recientes (últimos 30 días)
+            fecha_limite = datetime.now() - timedelta(days=30)
+            procesos = db.session.query(LoProcesos).filter(
+                LoProcesos.idServidor == id_servidor,
+                LoProcesos.fechaInicio >= fecha_limite
+            ).order_by(LoProcesos.fechaInicio.desc()).all()
+
+            # 3. Agrupar logs por proceso/día
+            datos = []
+            for proceso in procesos:
+                logs_por_nivel = db.session.query(
+                    loLogs.nivel,
+                    db.func.count(loLogs.idLogAplicacion)
+                ).filter(
+                    loLogs.idAuditoria == proceso.idAuditoria
+                ).group_by(loLogs.nivel).all()
+
+                datos.append({
+                    "fecha": proceso.fechaInicio.isoformat(),
+                    "procesos": [{
+                        "id_auditoria": proceso.idAuditoria,
+                        "estado": proceso.estado
+                    }],
+                    "logs": {nivel: count for nivel, count in logs_por_nivel}
+                })
+
+            # 4. Estructurar respuesta completa
+            return {
+                "id_servidor": id_servidor,  # Campo requerido
+                "nombre_servidor": servidor.nombreServidor,  # Campo requerido
+                "meta": {
+                    "total_resultados": len(datos),
+                    "fecha_minima": fecha_limite.isoformat(),
+                    "parametros": {
+                        "id_servidor": id_servidor,
+                        "agrupacion": agrupacion
+                    }
+                },
+                "datos": datos
+            }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al calcular evolución: {str(e)}"
+        )
+
+
+--------------------------------------------------TableroLogs.js
+import React, { useState, useEffect, useRef } from 'react';
+import { Line } from 'react-chartjs-2';
+import { Chart, registerables } from 'chart.js';
+import ModalLogs from './ModalLogs';
+import './TableroLogs.css';
+
+Chart.register(...registerables);
+
+const TableroLogs = () => {
+  const [servidores, setServidores] = useState([]);
+  const [histogramaData, setHistogramaData] = useState({});
+  const [cargando, setCargando] = useState(true);
+  const [error, setError] = useState(null);
+  const [mostrarModal, setMostrarModal] = useState(false);
+  const [logsSeleccionados, setLogsSeleccionados] = useState([]);
+  const [nivelSeleccionado, setNivelSeleccionado] = useState('');
+  const [servidorNombre, setServidorNombre] = useState('');
+  const websocket = useRef(null);
+
+  // Función auxiliar mejorada para manejar logs como objeto o array
+  const parseAndNormalizeLogs = (logs) => {
+    try {
+      let parsedLogs = typeof logs === 'string' ? JSON.parse(logs) : logs;
+      
+      // Si logs es un objeto (ej: {"FATAL": 3}), lo convertimos a array
+      if (parsedLogs && typeof parsedLogs === 'object' && !Array.isArray(parsedLogs)) {
+        return Object.entries(parsedLogs).map(([nivel, count]) => ({
+          nivel,
+          count
+        }));
+      }
+      
+      return Array.isArray(parsedLogs) ? parsedLogs : [];
+    } catch {
+      return [];
+    }
+  };
+
+  // Conexión WebSocket (se mantiene igual)
+  useEffect(() => {
+    const connectWebSocket = () => {
+      websocket.current = new WebSocket('ws://localhost:8000/ws/1');
+
+      websocket.current.onopen = () => {
+        console.log('Conexión WebSocket establecida');
+      };
+
+      websocket.current.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          if (message.eventType === 'histogram_update') {
+            const { idServidor, datos } = message.data;
+            setHistogramaData(prev => ({
+              ...prev,
+              [idServidor]: datos
+            }));
+          }
+        } catch (e) {
+          console.error('Error procesando mensaje WebSocket:', e);
+        }
+      };
+
+      websocket.current.onerror = (error) => {
+        console.error('Error en WebSocket:', error);
+      };
+
+      websocket.current.onclose = () => {
+        setTimeout(connectWebSocket, 5000);
+      };
+    };
+
+    connectWebSocket();
+    return () => websocket.current?.close();
+  }, []);
+
+  // Cargar datos iniciales (se mantiene igual)
+  const cargarDatos = async () => {
+    try {
+      setCargando(true);
+      setError(null);
+
+      const resServidores = await fetch('http://localhost:8000/api/servidores/?idEmpresa=1');
+      if (!resServidores.ok) throw new Error('Error al cargar servidores');
+      const dataServidores = await resServidores.json();
+      setServidores(dataServidores.resultados);
+
+      const histogramaPromesas = dataServidores.resultados.map(async (servidor) => {
+        const res = await fetch(
+          `http://localhost:8000/api/servidores/${servidor.id_servidor}/evolucion-errores/?idEmpresa=1&agrupacion=por_proceso`
+        );
+        return res.json();
+      });
+
+      const resultadosHistograma = await Promise.all(histogramaPromesas);
+      const nuevosDatos = {};
+      resultadosHistograma.forEach((result, index) => {
+        // Ordenamos los datos cronológicamente ascendente (más antiguos primero)
+        const datosOrdenados = [...result.datos].sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
+        nuevosDatos[dataServidores.resultados[index].id_servidor] = datosOrdenados;
+      });
+      setHistogramaData(nuevosDatos);
+
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCargando(false);
+    }
+  };
+
+  useEffect(() => {
+    cargarDatos();
+  }, []);
+
+  const abrirModalConLogs = async (servidor, nivel, procesoId = null) => {
+    try {
+      let url = `http://localhost:8000/api/servidores/${servidor.id_servidor}/logs-filtrados/?idEmpresa=1&nivel=${nivel}`;
+      if (procesoId) url += `&idAuditoria=${procesoId}`;
+
+      const resLogs = await fetch(url);
+      if (!resLogs.ok) throw new Error('No se pudieron obtener los logs');
+      const dataLogs = await resLogs.json();
+
+      setLogsSeleccionados(dataLogs.resultados || []);
+      setNivelSeleccionado(nivel);
+      setServidorNombre(servidor.nombreServidor);
+      setMostrarModal(true);
+    } catch (error) {
+      console.error(error);
+      alert('Error al cargar logs');
+    }
+  };
+
+  const opcionesLineChart = (servidorId) => ({
+    responsive: true,
+    interaction: {
+      mode: 'index',
+      intersect: false
+    },
+    scales: {
+      y: {
+        beginAtZero: true,
+        title: { display: true, text: 'Cantidad de logs' }
+      },
+      x: {
+        title: { display: true, text: 'Procesos' }
+      }
+    },
+    onClick: (event, elements) => {
+      if (elements.length > 0) {
+        const chart = event.chart;
+        const points = chart.getElementsAtEventForMode(
+          event,
+          'nearest',
+          { intersect: true },
+          false
+        );
+
+        if (points.length > 0) {
+          const clickedElement = points[0];
+          const datasetIndex = clickedElement.datasetIndex;
+          const niveles = ['FATAL', 'ERROR', 'WARN'];
+          const nivel = niveles[datasetIndex];
+          const procesoId = histogramaData[servidorId][clickedElement.index]?.procesos?.[0]?.id_auditoria;
+
+          if (procesoId) {
+            const servidor = servidores.find(s => s.id_servidor === servidorId);
+            abrirModalConLogs(servidor, nivel, procesoId);
+          }
+        }
+      }
+    },
+    plugins: {
+      tooltip: {
+        callbacks: {
+          label: (context) => `${context.dataset.label}: ${context.raw}`
+        }
+      }
+    }
+  });
+
+  if (cargando) {
+    return (
+      <div className="cargando">
+        <div className="spinner"></div>
+        <p>Cargando dashboard...</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="error">
+        <p>Error al cargar datos: {error}</p>
+        <button onClick={cargarDatos}>Reintentar</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="tablero-container">
+      <h2>Evolución de Errores por Proceso</h2>
+
+      <div className="servidores-grid">
+        {servidores.map((servidor) => {
+          // Aquí ordenamos por fecha ASC solo por si acaso, aunque ya está hecho al cargar
+          const datos = (histogramaData[servidor.id_servidor] || []).slice().sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
+
+          const labels = datos.map((_, index) => ` ${index + 1}`);
+
+          // Datos corregidos para manejar logs como objeto o array
+          const fatalData = datos.map(item => {
+            const normalizedLogs = parseAndNormalizeLogs(item.logs);
+            return normalizedLogs.filter(log => log.nivel === 'FATAL').reduce((sum, log) => sum + (log.count || 1), 0);
+          });
+
+          const errorData = datos.map(item => {
+            const normalizedLogs = parseAndNormalizeLogs(item.logs);
+            return normalizedLogs.filter(log => log.nivel === 'ERROR').reduce((sum, log) => sum + (log.count || 1), 0);
+          });
+
+          const warnData = datos.map(item => {
+            const normalizedLogs = parseAndNormalizeLogs(item.logs);
+            return normalizedLogs.filter(log => log.nivel === 'WARN').reduce((sum, log) => sum + (log.count || 1), 0);
+          });
+
+          const chartData = {
+            labels,
+            datasets: [
+              {
+                label: 'FATAL',
+                data: fatalData,
+                borderColor: '#D32F2F',
+                backgroundColor: 'rgba(211, 47, 47, 0.1)',
+                tension: 0.3,
+                borderWidth: 2
+              },
+              {
+                label: 'ERROR',
+                data: errorData,
+                borderColor: '#FF6384',
+                backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                tension: 0.3,
+                borderWidth: 2
+              },
+              {
+                label: 'WARN',
+                data: warnData,
+                borderColor: '#FFCE56',
+                backgroundColor: 'rgba(255, 206, 86, 0.1)',
+                tension: 0.3,
+                borderWidth: 2
+              }
+            ]
+          };
+
+          return (
+            <div key={servidor.id_servidor} className="servidor-card">
+              <h3>{servidor.nombreServidor}</h3>
+              <p className="ruta-servidor">{servidor.ruta}</p>
+
+              <div className="estado-servidor">
+                <span className={`badge ${servidor.activo ? 'activo' : 'inactivo'}`}>
+                  {servidor.activo ? 'ACTIVO' : 'INACTIVO'}
+                </span>
+                <span>Procesos: {datos.length}</span>
+              </div>
+
+              <div className="grafica-container" style={{ height: '320px' }}>
+              <Line 
+                data={chartData} 
+                options={{
+                  ...opcionesLineChart(servidor.id_servidor),
+                  maintainAspectRatio: false
+                }} 
+              />
+            </div>
+
+              <div className="metricas-rapidas">
+                <div className="metrica">
+                  <span>Total FATAL:</span>
+                  <strong>{fatalData.reduce((a, b) => a + b, 0)}</strong>
+                </div>
+                <div className="metrica">
+                  <span>Total ERROR:</span>
+                  <strong>{errorData.reduce((a, b) => a + b, 0)}</strong>
+                </div>
+                <div className="metrica">
+                  <span>Total WARN:</span>
+                  <strong>{warnData.reduce((a, b) => a + b, 0)}</strong>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {mostrarModal && (
+        <ModalLogs
+          nivel={nivelSeleccionado}
+          logs={logsSeleccionados}
+          onClose={() => setMostrarModal(false)}
+          servidorNombre={servidorNombre}
+        />
+      )}
+    </div>
+  );
+};
+
+export default TableroLogs;
