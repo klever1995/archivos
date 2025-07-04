@@ -716,3 +716,96 @@ const TableroLogs = () => {
 };
 
 export default TableroLogs;
+
+
+
+
+
+
+---------------------------nuevas tablas de la base de datos 
+CREATE TABLE `lo_accesosremotos` (
+  `idAcceso` int NOT NULL AUTO_INCREMENT,
+  `idEmpresa` int NOT NULL,
+  `idServidor` int NOT NULL,
+  `usuario` varchar(100) NOT NULL,
+  `contrasena` varchar(255) NOT NULL, -- Mejor guardar cifrado o hashed
+  `rutaRemota` varchar(500) NOT NULL COMMENT 'Ruta accesible para el agente en el equipo remoto',
+  `activo` tinyint(1) DEFAULT 1,
+  `fechaRegistro` datetime DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`idAcceso`),
+  KEY `fk_accesoremoto_servidor` (`idServidor`),
+  KEY `fk_accesoremoto_empresa` (`idEmpresa`),
+  CONSTRAINT `fk_accesoremoto_servidor` FOREIGN KEY (`idServidor`) REFERENCES `lo_servidores` (`idServidor`),
+  CONSTRAINT `fk_accesoremoto_empresa` FOREIGN KEY (`idEmpresa`) REFERENCES `as_empresa` (`idEmpresa`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+}
+
+CREATE TABLE `lo_logsremotos` (
+  `idLogRemoto` int NOT NULL AUTO_INCREMENT,
+  `idEmpresa` int NOT NULL,
+  `idServidor` int NOT NULL,
+  `idAuditoria` int NOT NULL,
+  `fechaCreacion` datetime NOT NULL,
+  `nivel` varchar(10) NOT NULL,
+  `mensaje` text,
+  `categoria` varchar(100) DEFAULT NULL,
+  `ocurrencias` int DEFAULT 1,
+  PRIMARY KEY (`idLogRemoto`),
+  KEY `fk_logsremotos_servidor` (`idServidor`),
+  KEY `fk_logsremotos_auditoria` (`idAuditoria`),
+  KEY `fk_logsremotos_empresa` (`idEmpresa`),
+  CONSTRAINT `fk_logsremotos_servidor` FOREIGN KEY (`idServidor`) REFERENCES `lo_servidores` (`idServidor`),
+  CONSTRAINT `fk_logsremotos_auditoria` FOREIGN KEY (`idAuditoria`) REFERENCES `lo_procesos` (`idAuditoria`),
+  CONSTRAINT `fk_logsremotos_empresa` FOREIGN KEY (`idEmpresa`) REFERENCES `as_empresa` (`idEmpresa`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+
+
+
+-------------------------------------loAccesosremotos.py
+from config import db
+
+class loAccesosRemotos(db.Model):
+    __tablename__ = 'LO_ACCESOSREMOTOS'
+
+    idAcceso = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    idEmpresa = db.Column(db.Integer, db.ForeignKey('AS_EMPRESA.idEmpresa'), nullable=False)
+    idServidor = db.Column(db.Integer, db.ForeignKey('LO_SERVIDORES.idServidor'), nullable=False)
+    usuario = db.Column(db.String(100), nullable=False)
+    contrasena = db.Column(db.String(255), nullable=False)  # Debería almacenarse cifrada
+    rutaRemota = db.Column(db.String(500), nullable=False)
+    activo = db.Column(db.Boolean, default=True)
+    fechaRegistro = db.Column(db.DateTime, default=db.func.current_timestamp())
+
+    # Relaciones
+    empresa = db.relationship('asEmpresa', backref='accesos_remotos')
+    servidor = db.relationship('loServidores', backref='accesos_remotos')
+
+
+
+
+---------------------------------------------------loLogsremotos.py
+from config import db
+from datetime import datetime
+
+class LoLogsRemotos(db.Model):
+    __tablename__ = 'LO_LOGSREMOTOS'
+
+    idLogRemoto = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    idEmpresa = db.Column(db.Integer, db.ForeignKey('AS_EMPRESA.idEmpresa'), nullable=False)
+    idServidor = db.Column(db.Integer, db.ForeignKey('LO_SERVIDORES.idServidor'), nullable=False)
+    idAuditoria = db.Column(db.Integer, db.ForeignKey('LO_PROCESOS.idAuditoria'), nullable=False)
+    fechaCreacion = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    nivel = db.Column(db.String(10), nullable=False)
+    mensaje = db.Column(db.Text, nullable=True)
+    categoria = db.Column(db.String(100), nullable=True)
+    ocurrencias = db.Column(db.Integer, default=1, nullable=True)
+
+    # Relaciones
+    empresa = db.relationship('AsEmpresa', backref='logs_remotos')
+    servidor = db.relationship('LoServidores', backref='logs_remotos')
+    proceso = db.relationship('LoProcesos', backref='logs_remotos')
+
+    def __repr__(self):
+        return f"<LoLogsRemotos idLogRemoto={self.idLogRemoto} nivel={self.nivel} fecha={self.fechaCreacion}>"
