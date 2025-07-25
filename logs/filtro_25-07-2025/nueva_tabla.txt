@@ -1,0 +1,14 @@
+CREATE TABLE `lo_interpretacionremota` (
+  `idInterpretacion` int NOT NULL AUTO_INCREMENT,
+  `idProcesoFiltrado` int NOT NULL COMMENT 'FK a lo_procesos.idAuditoria (solo procesos con tipoProceso=FILTRADOREMOTO)',
+  `idServidor` int NOT NULL,
+  `fechaInicio` datetime NOT NULL,
+  `fechaFin` datetime DEFAULT NULL,
+  `duracionSegundos` float GENERATED ALWAYS AS (TIMESTAMPDIFF(SECOND, `fechaInicio`, `fechaFin`)) STORED,
+  `ultimoLogProcesado` int DEFAULT 0 COMMENT 'ID del último registro procesado en lo_logsremotos',
+  `totalLogsInterpretados` int DEFAULT 0,
+  `estado` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`idInterpretacion`),
+  FOREIGN KEY (`idProcesoFiltrado`) REFERENCES `lo_procesos` (`idAuditoria`),
+  FOREIGN KEY (`idServidor`) REFERENCES `lo_servidores` (`idServidor`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
