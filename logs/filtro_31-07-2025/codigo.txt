@@ -1,0 +1,550 @@
+bichito
+#!/usr/bin/env python3
+# filtro_remotos.py
+import os
+import sys
+import re
+import logging
+from datetime import datetime
+from collections import defaultdict
+
+# Configura rutas y imports reutilizables
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from config import init_app, db
+from flask import Flask
+from modelo.loServidores import loServidores 
+from insertar import Logger  # Reutilizamos toda la lógica de filtrado
+from metodos_loprocesos import ProcesosLogger  # Gestión de procesos
+from logs_remotos import insertar_logs_remotos  # Tu nuevo módulo
+
+# Configuración básica
+app = Flask(__name__)
+init_app(app)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
+
+def procesar_archivo_remoto(ruta_archivo: str, id_servidor: int) -> bool:
+    with app.app_context():
+        try:
+            bloque = ProcesosLogger.reservar_bloque(
+                ruta_archivo=ruta_archivo,
+                idEmpresa=1,
+                operador=0,
+                idServidor=id_servidor,
+                tipoProceso='FILTRADOREMOTO',
+                bloque_size=1048576
+            )
+
+            if not bloque:
+                logger.info("No hay nuevos datos para procesar")
+                return True
+
+            id_auditoria = bloque['idAuditoria']
+            byte_inicio = bloque['byte_inicio']
+            byte_fin = bloque['byte_fin']
+
+            contenido = leer_chunk_local_para_pruebas(ruta_archivo, byte_inicio, byte_fin)
+            bloques = extraer_bloques_log(contenido, byte_inicio, ruta_archivo)  # Fixed: añadido ruta_archivo
+            reporte = generar_reporte_basico(bloques)
+
+            total = insertar_logs_remotos(reporte, id_servidor, id_auditoria)
+
+            ProcesosLogger.finalizar_proceso(
+                idAuditoria=id_auditoria,
+                totalLogs=total,
+                ultimo_byte=byte_fin
+            )
+            logger.info(f"Proceso completado. Logs insertados: {total} (Bytes: {byte_inicio}-{byte_fin})")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error procesando {ruta_archivo}: {str(e)}", exc_info=True)
+            if 'id_auditoria' in locals():
+                ProcesosLogger.marcar_error(id_auditoria)
+            return False
+
+def leer_chunk_local_para_pruebas(ruta: str, byte_inicio: int, byte_fin: int) -> str:
+    try:
+        with open(ruta, 'rb') as f:
+            f.seek(byte_inicio)
+            return f.read(byte_fin - byte_inicio + 1).decode('utf-8', errors='ignore')
+    except Exception as e:
+        logger.error(f"Error leyendo chunk local: {str(e)}")
+        raise
+
+def extraer_bloques_log(chunk: str, byte_inicio: int = 0, ruta_archivo: str = None) -> list:
+    bloques = []
+    bloque_actual = []
+    linea_inicio = None
+    
+    # 1. Calcular líneas previas (solo si hay ruta_archivo)
+    lineas_previas = 0
+    if byte_inicio > 0 and ruta_archivo:
+        try:
+            with open(ruta_archivo, 'rb') as f:
+                f.seek(0)
+                lineas_previas = f.read(byte_inicio).decode('utf-8', errors='ignore').count('\n')
+        except Exception as e:
+            logger.error(f"Error calculando líneas previas: {str(e)}")
+            lineas_previas = 0
+
+    # 2. Procesar chunk con offset correcto
+    lineas = chunk.splitlines(keepends=True)
+    for i, linea in enumerate(lineas, start=lineas_previas + 1):
+        if Logger.es_inicio_log(linea):
+            nivel = Logger.extraer_nivel(linea)
+            if nivel in ['INFO', 'DEBUG']:
+                bloque_actual = []
+                continue
+
+            if bloque_actual:
+                bloques.append({
+                    'linea_inicio': linea_inicio,
+                    'contenido': ''.join(bloque_actual)
+                })
+            bloque_actual = [linea]
+            linea_inicio = i
+        elif bloque_actual:
+            if linea.startswith(("   ", "\t", "at ")):
+                bloque_actual.append(linea)
+            else:
+                if bloque_actual:
+                    bloques.append({
+                        'linea_inicio': linea_inicio,
+                        'contenido': ''.join(bloque_actual)
+                    })
+                bloque_actual = []
+
+    if bloque_actual and Logger.extraer_nivel(bloque_actual[0]) not in ['INFO', 'DEBUG']:
+        bloques.append({
+            'linea_inicio': linea_inicio,
+            'contenido': ''.join(bloque_actual)
+        })
+    return bloques
+
+def generar_reporte_basico(bloques: list) -> dict:
+    reporte = defaultdict(lambda: {
+        'count': 0,
+        'mensaje_normalizado': '',
+        'nivel': '',
+        'categoria': '',
+        'componente': '',
+        'hilo': '',
+        'lineas': []
+    })
+
+    for bloque in bloques:
+        linea_inicio = bloque['linea_inicio']
+        Logger.procesar_bloque(
+            bloque_actual=bloque['contenido'].splitlines(keepends=True),
+            linea_inicio=linea_inicio,
+            reporte=reporte
+        )
+    return reporte
+
+if __name__ == "__main__":
+    ruta_prueba = input("Ingrese ruta del archivo de log para prueba: ").strip()
+    id_servidor_prueba = int(input("Ingrese ID de servidor remoto (de la BD): ").strip())
+
+    if not os.path.exists(ruta_prueba):
+        print(f"❌ Archivo no encontrado: {ruta_prueba}")
+        sys.exit(1)
+
+    print("\n=== INICIANDO PRUEBA DE FILTRADO REMOTO ===")
+    success = procesar_archivo_remoto(ruta_prueba, id_servidor_prueba)
+
+    if success:
+        print("✅ Prueba exitosa. Verifique los datos en la tabla lo_logsremotos.")
+    else:
+        print("❌ Falló el procesamiento. Revise los logs.")
+
+
+
+
+
+
+
+
+
+  metodos_loremotos
+#!/usr/bin/env python3
+# filtro_remotos.py
+import os
+import sys
+import re
+import logging
+from datetime import datetime
+from collections import defaultdict
+
+# Configura rutas y imports reutilizables
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from config import init_app, db
+from flask import Flask
+from modelo.loServidores import loServidores 
+from insertar import Logger  # Reutilizamos toda la lógica de filtrado
+from metodos_loprocesos import ProcesosLogger  # Gestión de procesos
+from logs_remotos import insertar_logs_remotos  # Tu nuevo módulo
+
+# Configuración básica
+app = Flask(__name__)
+init_app(app)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
+
+def procesar_archivo_remoto(ruta_archivo: str, id_servidor: int) -> bool:
+    with app.app_context():
+        try:
+            bloque = ProcesosLogger.reservar_bloque(
+                ruta_archivo=ruta_archivo,
+                idEmpresa=1,
+                operador=0,
+                idServidor=id_servidor,
+                tipoProceso='FILTRADOREMOTO',
+                bloque_size=1048576
+            )
+
+            if not bloque:
+                logger.info("No hay nuevos datos para procesar")
+                return True
+
+            id_auditoria = bloque['idAuditoria']
+            byte_inicio = bloque['byte_inicio']
+            byte_fin = bloque['byte_fin']
+
+            contenido = leer_chunk_local_para_pruebas(ruta_archivo, byte_inicio, byte_fin)
+            bloques = extraer_bloques_log(contenido, byte_inicio, ruta_archivo)  # Fixed: añadido ruta_archivo
+            reporte = generar_reporte_basico(bloques)
+
+            total = insertar_logs_remotos(reporte, id_servidor, id_auditoria)
+
+            ProcesosLogger.finalizar_proceso(
+                idAuditoria=id_auditoria,
+                totalLogs=total,
+                ultimo_byte=byte_fin
+            )
+            logger.info(f"Proceso completado. Logs insertados: {total} (Bytes: {byte_inicio}-{byte_fin})")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error procesando {ruta_archivo}: {str(e)}", exc_info=True)
+            if 'id_auditoria' in locals():
+                ProcesosLogger.marcar_error(id_auditoria)
+            return False
+
+def leer_chunk_local_para_pruebas(ruta: str, byte_inicio: int, byte_fin: int) -> str:
+    try:
+        with open(ruta, 'rb') as f:
+            f.seek(byte_inicio)
+            return f.read(byte_fin - byte_inicio + 1).decode('utf-8', errors='ignore')
+    except Exception as e:
+        logger.error(f"Error leyendo chunk local: {str(e)}")
+        raise
+
+def extraer_bloques_log(chunk: str, byte_inicio: int = 0, ruta_archivo: str = None) -> list:
+    bloques = []
+    bloque_actual = []
+    linea_inicio = None
+    
+    # 1. Calcular líneas previas (solo si hay ruta_archivo)
+    lineas_previas = 0
+    if byte_inicio > 0 and ruta_archivo:
+        try:
+            with open(ruta_archivo, 'rb') as f:
+                f.seek(0)
+                lineas_previas = f.read(byte_inicio).decode('utf-8', errors='ignore').count('\n')
+        except Exception as e:
+            logger.error(f"Error calculando líneas previas: {str(e)}")
+            lineas_previas = 0
+
+    # 2. Procesar chunk con offset correcto
+    lineas = chunk.splitlines(keepends=True)
+    for i, linea in enumerate(lineas, start=lineas_previas + 1):
+        if Logger.es_inicio_log(linea):
+            nivel = Logger.extraer_nivel(linea)
+            if nivel in ['INFO', 'DEBUG']:
+                bloque_actual = []
+                continue
+
+            if bloque_actual:
+                bloques.append({
+                    'linea_inicio': linea_inicio,
+                    'contenido': ''.join(bloque_actual)
+                })
+            bloque_actual = [linea]
+            linea_inicio = i
+        elif bloque_actual:
+            if linea.startswith(("   ", "\t", "at ")):
+                bloque_actual.append(linea)
+            else:
+                if bloque_actual:
+                    bloques.append({
+                        'linea_inicio': linea_inicio,
+                        'contenido': ''.join(bloque_actual)
+                    })
+                bloque_actual = []
+
+    if bloque_actual and Logger.extraer_nivel(bloque_actual[0]) not in ['INFO', 'DEBUG']:
+        bloques.append({
+            'linea_inicio': linea_inicio,
+            'contenido': ''.join(bloque_actual)
+        })
+    return bloques
+
+def generar_reporte_basico(bloques: list) -> dict:
+    reporte = defaultdict(lambda: {
+        'count': 0,
+        'mensaje_normalizado': '',
+        'nivel': '',
+        'categoria': '',
+        'componente': '',
+        'hilo': '',
+        'lineas': []
+    })
+
+    for bloque in bloques:
+        linea_inicio = bloque['linea_inicio']
+        Logger.procesar_bloque(
+            bloque_actual=bloque['contenido'].splitlines(keepends=True),
+            linea_inicio=linea_inicio,
+            reporte=reporte
+        )
+    return reporte
+
+if __name__ == "__main__":
+    ruta_prueba = input("Ingrese ruta del archivo de log para prueba: ").strip()
+    id_servidor_prueba = int(input("Ingrese ID de servidor remoto (de la BD): ").strip())
+
+    if not os.path.exists(ruta_prueba):
+        print(f"❌ Archivo no encontrado: {ruta_prueba}")
+        sys.exit(1)
+
+    print("\n=== INICIANDO PRUEBA DE FILTRADO REMOTO ===")
+    success = procesar_archivo_remoto(ruta_prueba, id_servidor_prueba)
+
+    if success:
+        print("✅ Prueba exitosa. Verifique los datos en la tabla lo_logsremotos.")
+    else:
+        print("❌ Falló el procesamiento. Revise los logs.")
+
+
+
+
+
+
+  Lointerpretacionremota
+from config import db
+from datetime import datetime
+
+class loInterpretacionremota(db.Model):
+    __tablename__ = 'LO_INTERPRETACIONREMOTA'
+    
+    idInterpretacion = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    idProcesoFiltrado = db.Column(
+        db.Integer, 
+        db.ForeignKey('LO_PROCESOS.idAuditoria'), 
+        nullable=False,
+        comment='FK a LO_PROCESOS.idAuditoria (solo procesos con tipoProceso=FILTRADOREMOTO)'
+    )
+    idServidor = db.Column(
+        db.Integer, 
+        db.ForeignKey('LO_SERVIDORES.idServidor'), 
+        nullable=False
+    )
+    fechaInicio = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    fechaFin = db.Column(db.DateTime)
+    ultimoLogProcesado = db.Column(
+        db.Integer, 
+        default=0, 
+        comment='ID del último registro procesado en LO_LOGSREMOTOS'
+    )
+    totalLogsInterpretados = db.Column(db.Integer, default=0)
+    estado = db.Column(db.String(20))
+
+    # Relaciones exactas (con nombres exactos de clase)
+    proceso_filtrado = db.relationship(
+        'LoProcesos',  
+        foreign_keys=[idProcesoFiltrado],
+        backref=db.backref('interpretaciones_remotas', lazy='dynamic')
+    )
+    servidor = db.relationship(
+        'loServidores',  
+        foreign_keys=[idServidor],
+        backref=db.backref('interpretaciones_remotas', lazy='dynamic')
+    )
+
+    @property
+    def duracionSegundos(self):
+        if self.fechaFin:
+            return (self.fechaFin - self.fechaInicio).total_seconds()
+        return None
+
+    def __repr__(self):
+        return f'<loInterpretacionremota {self.idInterpretacion} (Proceso: {self.idProcesoFiltrado})>'
+
+
+
+
+
+
+  loLogsremotos
+  from config import db
+
+class loLogsremotos(db.Model):
+    __tablename__ = 'LO_LOGSREMOTOS'  # ¡Mayúsculas como en tus otros modelos!
+    
+    idLogRemoto = db.Column(db.Integer, primary_key=True)
+    idEmpresa = db.Column(db.Integer, db.ForeignKey('AS_EMPRESA.idEmpresa'), nullable=False)
+    idServidor = db.Column(db.Integer, db.ForeignKey('LO_SERVIDORES.idServidor'), nullable=False)
+    idAuditoria = db.Column(db.Integer, db.ForeignKey('LO_PROCESOS.idAuditoria'), nullable=False)
+    fechaCreacion = db.Column(db.DateTime, nullable=False)
+    nivel = db.Column(db.String(10), nullable=False)
+    mensaje = db.Column(db.Text)
+    categoria = db.Column(db.String(100))
+    ocurrencias = db.Column(db.Integer, default=1)
+    componente = db.Column(db.String(255))  
+    hilo = db.Column(db.String(200))    
+    lineas = db.Column(db.JSON)   
+
+    # Relaciones IDÉNTICAS a tus modelos funcionales (usando strings)
+    empresa = db.relationship('asEmpresa', backref='logsremotos')  # 1. String 'asEmpresa'
+    servidor = db.relationship('loServidores', foreign_keys=[idServidor], backref='logsremotos')  # 2. String 'loServidores'
+    proceso = db.relationship('LoProcesos', foreign_keys=[idAuditoria], backref='logsremotos')  # 3. String 'LoProcesos'
+
+
+
+
+
+  logs_remotos.py
+  import os
+import sys
+from collections import defaultdict
+from datetime import datetime
+import logging
+from flask import Flask
+from sqlalchemy import text, exc
+
+# Configuración de rutas
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+# Importaciones
+from config import db, init_app
+from modelo.loLogsremotos import loLogsremotos
+
+# Configuración de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Inicialización Flask
+app = Flask(__name__)
+init_app(app)
+
+def verificar_ids(id_servidor, id_auditoria):
+    """Verifica que los IDs existan en las tablas relacionadas"""
+    with app.app_context():
+        try:
+            # Verificar servidor
+            if not db.session.execute(
+                text("SELECT 1 FROM LO_SERVIDORES WHERE idServidor = :id"),
+                {'id': id_servidor}
+            ).scalar():
+                logger.error(f"ID Servidor {id_servidor} no existe")
+                return False
+
+            # Verificar auditoría
+            if not db.session.execute(
+                text("SELECT 1 FROM LO_PROCESOS WHERE idAuditoria = :id"),
+                {'id': id_auditoria}
+            ).scalar():
+                logger.error(f"ID Auditoría {id_auditoria} no existe")
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Error verificando IDs: {str(e)}")
+            return False
+
+def insertar_logs_remotos(reporte, idServidor, idAuditoria):
+    """
+    Versión actualizada que incluye los nuevos campos manteniendo toda la funcionalidad existente.
+    """
+    if not verificar_ids(idServidor, idAuditoria):
+        return 0
+
+    niveles_validos = {'ERROR', 'FATAL', 'WARN'}
+    registros = []
+
+    try:
+        # Preparar datos (AHORA CON LOS NUEVOS CAMPOS)
+        for (nivel, categoria, _), datos in reporte.items():
+            if nivel not in niveles_validos:
+                continue
+
+            registros.append({
+                'idEmpresa': 1,
+                'idServidor': idServidor,
+                'idAuditoria': idAuditoria,
+                'fechaCreacion': datetime.now(),
+                'nivel': nivel,
+                'mensaje': str(datos.get('mensaje_normalizado', ''))[:65535],
+                'categoria': categoria,
+                'ocurrencias': int(datos.get('count', 1)),
+                'componente': datos.get('componente', None),  
+                'hilo': datos.get('hilo', None),            
+                'lineas': datos.get('lineas', None)         
+            })
+
+        if not registros:
+            return 0
+
+        # Insertar (misma lógica segura)
+        with app.app_context():
+            db.session.execute(
+                loLogsremotos.__table__.insert(),
+                registros
+            )
+            db.session.commit()
+            logger.info(f"Insertados {len(registros)} registros (incluyendo componente/hilo/lineas)")
+            return len(registros)
+
+    except exc.IntegrityError as e:
+        logger.error(f"Error de integridad: {str(e)}")
+        db.session.rollback()
+        return 0
+    except Exception as e:
+        logger.error(f"Error inesperado: {str(e)}")
+        db.session.rollback()
+        return 0
+
+if __name__ == "__main__":
+    # Configurar contexto de aplicación para pruebas
+    with app.app_context():
+        # Datos de prueba con IDs válidos
+        test_data = {
+            ('ERROR', 'database', 'test'): {
+                'mensaje_normalizado': '[TEST] Conexión fallida',
+                'count': 1
+            }
+        }
+
+        # Obtener IDs válidos de la base de datos
+        id_servidor_valido = db.session.execute(
+            text("SELECT idServidor FROM LO_SERVIDORES LIMIT 1")
+        ).scalar() or 1
+
+        id_auditoria_valido = db.session.execute(
+            text("SELECT idAuditoria FROM LO_PROCESOS LIMIT 1")
+        ).scalar() or 1
+
+        print("\n=== PRUEBA CON DATOS REALES ===")
+        resultado = insertar_logs_remotos(
+            reporte=test_data,
+            idServidor=id_servidor_valido,
+            idAuditoria=id_auditoria_valido
+        )
+        print(f"Resultado: {resultado} registros insertados")
