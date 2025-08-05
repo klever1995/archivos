@@ -1,0 +1,153 @@
+/* Estilos base */
+.contenedor-errores {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    padding: 20px;
+    background-color: #f8f9fa;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+  }
+  
+  /* Filtros */
+  .filtros {
+    display: flex;
+    gap: 15px;
+    margin-bottom: 20px;
+  }
+  
+  .filtros select, .filtros input {
+    padding: 8px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+  }
+  
+  /* Tabla */
+  .tabla-errores {
+    width: 100%;
+    border-collapse: collapse;
+    background-color: white;
+  }
+  
+  .tabla-errores th {
+    background-color: #2c3e50;
+    color: white;
+    padding: 12px;
+    text-align: left;
+  }
+  
+  .tabla-errores td {
+    padding: 12px;
+    border-bottom: 1px solid #eee;
+  }
+  
+  /* Badges de nivel */
+  .badge-nivel-error {
+    background-color: #f44336;
+    color: white;
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+  }
+  
+  .badge-nivel-warn {
+    background-color: #ffc107;
+    color: #333;
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+  }
+  
+  .badge-nivel-info {
+    background-color: #2196f3;
+    color: white;
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+  }
+  
+  /* Mensajes */
+  .mensaje-celda {
+    max-width: 300px;
+  }
+  
+  .mensaje-resumido {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  
+  .mensaje-completo {
+    white-space: pre-wrap;
+    background-color: #f5f5f5;
+    padding: 10px;
+    margin-top: 5px;
+    border-radius: 4px;
+    font-family: monospace;
+  }
+  
+  /* Botones */
+  .btn-expandir {
+    background: none;
+    border: none;
+    color: #2196f3;
+    cursor: pointer;
+    padding: 0 5px;
+  }
+  
+  .btn-solucion {
+    background-color: #4caf50;
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  
+  /* Filas por nivel */
+  .fila-nivel-error {
+    background-color: #ffebee;
+  }
+  
+  .fila-nivel-warn {
+    background-color: #fff8e1;
+  }
+
+
+
+  /* Ventana modal */
+
+ /* Estilos del modal */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modal-contenido {
+  background: white;
+  padding: 20px;
+  border-radius: 8px;
+  max-width: 80%;
+  width: 500px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+}
+
+.btn-cerrar-modal {
+  margin-top: 15px;
+  padding: 8px 16px;
+  background: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.btn-cerrar-modal:hover {
+  background: #0056b3;
+}
