@@ -1,3 +1,35 @@
+# metodos_loremotos.py
+import os
+import sys
+import re
+import time
+import hashlib
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict
+import logging
+
+# Configuración CRUCIAL de rutas
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+from modelo.asEmpresa import asEmpresa
+from modelo.loServidores import loServidores
+from modelo.loProcesos import LoProcesos
+from modelo.loLogsremotos import loLogsremotos
+from modelo.loErrorconocido import loErrorconocido
+from modelo.loLogs import loLogs
+from modelo.loInterpretacionremota import loInterpretacionremota
+from config import db, init_app
+from flask import Flask
+
+from consumos.consulta_ia_openai import Consulta_ia_openai
+
+# Inicialización de la app (como en tus otros archivos)
+app = Flask(__name__)
+init_app(app)
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
 def interpretar_logs_remotos(id_servidor: int, batch_size: int = 100) -> bool:
     """Interpretación remota con IA y guardado de resultados por servidor."""
     with app.app_context():
@@ -164,3 +196,12 @@ def interpretar_logs_remotos(id_servidor: int, batch_size: int = 100) -> bool:
                 interpretacion.estado = 'FALLIDO'
                 db.session.commit()
             return False
+
+# Prueba con diagnóstico completo
+if __name__ == "__main__":
+    print("\n=== DIAGNÓSTICO IA ===")
+    print("Iniciando prueba de interpretación...")
+    if interpretar_logs_remotos(id_servidor=110):
+        print("✅ Proceso completado - Ver logs para detalles")
+    else:
+        print("❌ Falla crítica - Ver logs para diagnóstico")
