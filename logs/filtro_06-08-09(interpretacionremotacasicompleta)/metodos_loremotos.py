@@ -4,6 +4,7 @@ import sys
 import re
 import time
 import hashlib
+from sqlalchemy import func
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
@@ -39,31 +40,30 @@ def interpretar_logs_remotos(id_servidor: int, batch_size: int = 100) -> bool:
             if not servidor or not servidor.esRemoto:
                 raise ValueError("ID de servidor remoto inválido")
 
-            # 2. Obtener último proceso de filtrado
-            ultimo_proceso = db.session.query(LoProcesos.idAuditoria)\
-                .filter_by(idServidor=id_servidor, tipoProceso='FILTRADOREMOTO')\
-                .order_by(LoProcesos.idAuditoria.desc())\
-                .first()
-            
-            if not ultimo_proceso:
-                raise ValueError("No existe proceso FILTRADOREMOTO para este servidor")
+            # 2. Obtener último ID procesado de ejecuciones anteriores
+            ultimo_id = db.session.query(
+                func.max(loInterpretacionremota.ultimoLogProcesado)
+            ).filter_by(idServidor=id_servidor).scalar() or 0
 
-            # 3. Crear nueva interpretación
+            # 3. Crear nueva interpretación con el último ID real
             interpretacion = loInterpretacionremota(
-                idProcesoFiltrado=ultimo_proceso.idAuditoria,
+                idProcesoFiltrado=db.session.query(LoProcesos.idAuditoria)
+                    .filter_by(idServidor=id_servidor, tipoProceso='FILTRADOREMOTO')
+                    .order_by(LoProcesos.idAuditoria.desc())
+                    .first().idAuditoria,
                 idServidor=id_servidor,
                 fechaInicio=datetime.now(),
                 estado='PROCESANDO',
-                ultimoLogProcesado=0,
+                ultimoLogProcesado=ultimo_id,  # Usa el último ID real
                 totalLogsInterpretados=0
             )
             db.session.add(interpretacion)
             db.session.flush()
 
-            # 4. Obtener logs nuevos
+            # 4. Obtener SOLO logs no procesados
             logs = db.session.query(loLogsremotos).filter(
                 loLogsremotos.idServidor == id_servidor,
-                loLogsremotos.idLogRemoto > interpretacion.ultimoLogProcesado
+                loLogsremotos.idLogRemoto > ultimo_id  # Filtro clave
             ).order_by(loLogsremotos.idLogRemoto).limit(batch_size).all()
 
             if not logs:
@@ -94,7 +94,6 @@ def interpretar_logs_remotos(id_servidor: int, batch_size: int = 100) -> bool:
                         'mensaje_normalizado': log.mensaje[:2000],
                         'hash_error': hash_error
                     })
-                    logger.debug(f"📡 Log {log.idLogRemoto} marcado para consulta IA (nivel: {log.nivel})")
 
                 logs_a_guardar.append({
                     'log': log,
@@ -141,23 +140,15 @@ def interpretar_logs_remotos(id_servidor: int, batch_size: int = 100) -> bool:
                     logger.error(f"Error al consultar IA: {str(e)}")
                     db.session.rollback()
 
-            # 7. Guardar en loLogs (CORRECCIÓN APLICADA AQUÍ)
+            # 7. Guardar en loLogs (CORRECCIÓN CRÍTICA)
             logs_insertar = []
             for item in logs_a_guardar:
-                respuesta = None
-                
-                if item['error_conocido']:
-                    respuesta = item['error_conocido'].respuestaopenai
-                    logger.debug(f"♻️ Usando caché para log {item['log'].idLogRemoto}")
-                else:
-                    for hash_err, resp in respuestas_ia:
-                        if hash_err == item['hash_error']:
-                            respuesta = resp
-                            break
+                respuesta = item['error_conocido'].respuestaopenai if item['error_conocido'] else \
+                    next((r for r in respuestas_ia if r[0] == item['hash_error']), None)
                 
                 if respuesta:
                     logs_insertar.append(loLogs(
-                                                idEmpresa=servidor.idEmpresa,
+                        idEmpresa=servidor.idEmpresa,
                         idServidor=id_servidor,
                         idAuditoria=item['log'].idAuditoria,
                         operador=0,
@@ -170,23 +161,26 @@ def interpretar_logs_remotos(id_servidor: int, batch_size: int = 100) -> bool:
                         lineas=item['log'].lineas,
                         respuestaOpenai=respuesta,
                         fechaCreacion=fecha_actual
-
                     ))
-                    interpretacion.ultimoLogProcesado = item['log'].idLogRemoto  # Mantener esto
+                    # Actualiza con el máximo ID del batch
+                    interpretacion.ultimoLogProcesado = max(
+                        interpretacion.ultimoLogProcesado,
+                        item['log'].idLogRemoto
+                    )
 
-            # CONTADOR CORREGIDO (ASIGNACIÓN ÚNICA)
+            # Asignación final del contador
             interpretacion.totalLogsInterpretados = len(logs_insertar)
 
             if logs_insertar:
                 db.session.bulk_save_objects(logs_insertar)
-                logger.info(f"💽 Guardados {len(logs_insertar)} logs en BD")
+                logger.info(f"💽 Guardados {len(logs_insertar)} logs nuevos (IDs desde {min(log.idLogRemoto for log in logs)} hasta {max(log.idLogRemoto for log in logs)})")
             
             # 8. Actualizar estado final
-            interpretacion.estado = 'COMPLETADO' if len(logs) < batch_size else 'PROCESANDO'
-            interpretacion.fechaFin = datetime.now() if interpretacion.estado == 'COMPLETADO' else None
+            interpretacion.estado = 'COMPLETADO'
+            interpretacion.fechaFin = datetime.now()
             db.session.commit()
             
-            logger.info(f"📊 Interpretación completada. Logs procesados: {len(logs_insertar)}")
+            logger.info(f"📊 Interpretación completada. Logs nuevos procesados: {len(logs_insertar)}")
             return True
 
         except Exception as e:
