@@ -1,0 +1,213 @@
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.7);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+  }
+  
+  .modal-container {
+    background: white;
+    border-radius: 8px;
+    width: 90%;
+    max-width: 1200px;
+    max-height: 90vh;
+    overflow: hidden;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+    display: flex;
+    flex-direction: column;
+  }
+  
+  .modal-header {
+    padding: 16px 20px;
+    background: #2c3e50;
+    color: white;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  
+  .close-button {
+    background: none;
+    border: none;
+    color: white;
+    font-size: 24px;
+    cursor: pointer;
+  }
+  
+  .modal-filtros {
+    padding: 12px 20px;
+    background: #f5f7fa;
+    border-bottom: 1px solid #e1e4e8;
+    display: flex;
+    gap: 15px;
+    align-items: center;
+  }
+  
+  .modal-filtros input {
+    padding: 8px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+  }
+  
+  .fecha-filtros {
+    display: flex;
+    gap: 10px;
+  }
+  
+  .tabla-contenedor {
+    overflow-y: auto;
+    flex-grow: 1;
+  }
+  
+  .tabla-logs {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  
+  .tabla-logs th {
+    background-color: #f8f9fa;
+    padding: 12px 15px;
+    text-align: left;
+    font-weight: 600;
+    color: #495057;
+    border-bottom: 2px solid #e1e4e8;
+    position: sticky;
+    top: 0;
+  }
+  
+  .tabla-logs td {
+    padding: 12px 15px;
+    border-bottom: 1px solid #e9ecef;
+    vertical-align: top;
+  }
+  
+  .fila-log.ERROR {
+    background-color: #fff5f5; 
+    color: #495057 !important; 
+  }
+  
+  
+  .fila-log.WARN {
+    background-color: #fff9e6;
+  }
+  
+  .fila-log.INFO {
+    background-color: #f0f7ff;
+  }
+  
+  .mensaje-celda {
+    max-width: 300px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  
+  .acciones-celda {
+    white-space: nowrap;
+  }
+  
+  .btn-detalle {
+    background-color: #4a6fa5;
+    color: white;
+    border: none;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: background-color 0.2s;
+  }
+  
+  .btn-detalle:hover {
+    background-color: #3a5a80;
+  }
+  
+  .fila-expandida {
+    background-color: #f8f9fa;
+  }
+  
+  
+  .detalle-expandido,
+  .mensaje-completo pre {
+    color: #495057 !important;
+  }
+  
+  .mensaje-completo pre {
+    white-space: pre-wrap;
+    font-family: inherit;
+    margin: 8px 0 0;
+    padding: 10px;
+    background-color: #e9ecef;
+    border-radius: 4px;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  
+  .lineas-afectadas, .solucion-ia {
+    margin-top: 15px;
+  }
+  
+  .solucion-contenido {
+    margin-top: 8px;
+    padding: 10px;
+    background-color: #e6f7ff;
+    border-left: 3px solid #1890ff;
+    border-radius: 4px;
+  }
+  
+  .sin-resultados {
+    text-align: center;
+    padding: 20px;
+    color: #6c757d;
+  }
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  /* Fuerza color neutral en TODOS los elementos de texto */
+  .tabla-logs,
+  .tabla-logs *:not(.btn-detalle):not(.close-button) {
+    color: #495057 !important;
+  }
+  
+  /* Específico para mensajes de error */
+  .fila-log.ERROR,
+  .fila-log.ERROR .mensaje-celda,
+  .fila-log.ERROR .mensaje-completo,
+  .fila-log.ERROR pre {
+    color: #495057 !important;
+  }
+  
+  /* Reset explícito para contenido expandido */
+  .detalle-expandido,
+  .detalle-expandido * {
+    color: #495057 !important;
+  }
+
+/* Estilos específicos para FATAL */
+.fila-log.FATAL {
+  background-color: #ffebee; /* Fondo rojo claro */
+  border-left: 4px solid #d32f2f; /* Borde izquierdo rojo oscuro */
+}
+
+.fila-log.FATAL:hover {
+  background-color: #ffcdd2; /* Rojo más intenso al hover */
+}
+
+/* Asegurar legibilidad del texto */
+.fila-log.FATAL,
+.fila-log.FATAL td,
+.fila-log.FATAL .mensaje-completo {
+  color: #495057 !important; /* Mismo color de texto que los demás niveles */
+}
