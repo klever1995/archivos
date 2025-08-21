@@ -1,0 +1,253 @@
+.multi-log-container {
+  font-family: 'Segoe UI', sans-serif;
+  max-width: 1200px;
+  margin: 20px auto;
+  padding: 20px;
+  background: #f9f9f9;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+}
+
+.agregar-archivo {
+  display: grid;
+  grid-template-columns: 1fr 100px 120px;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.agregar-archivo input {
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.agregar-archivo button {
+  background: #4CAF50;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.3s;
+}
+
+.agregar-archivo button:hover {
+  background: #45a049;
+}
+
+.lista-archivos {
+  background: white;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  padding: 12px 15px;
+  text-align: left;
+  border-bottom: 1px solid #eee;
+}
+
+th {
+  background: #f2f2f2;
+  font-weight: 500;
+}
+
+.estado {
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.estado.activo {
+  color: #2e7d32;
+  background: #e8f5e9;
+}
+
+.accion-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.error {
+  background: #ffebee;
+  color: #c62828;
+  padding: 10px 15px;
+  border-radius: 4px;
+  margin-top: 15px;
+  cursor: pointer;
+}
+
+.header-con-boton {
+display: flex;
+justify-content: space-between;
+align-items: center;
+margin-bottom: 20px;
+flex-wrap: wrap;
+gap: 15px;
+}
+
+.btn-ir-graficos {
+background-color: #4a6fa5;
+color: white;
+border: none;
+padding: 10px 20px;
+border-radius: 4px;
+cursor: pointer;
+font-size: 14px;
+transition: all 0.3s;
+white-space: nowrap;
+}
+
+.btn-ir-graficos:hover {
+background-color: #3a5a80;
+transform: translateY(-2px);
+box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+}
+
+.eliminar {
+background: #ff5252;
+color: white;
+border: none;
+border-radius: 4px;
+padding: 6px 12px;
+margin-left: 8px;
+cursor: pointer;
+font-weight: 500;
+transition: all 0.2s;
+}
+
+.eliminar:hover {
+background: #ff1744;
+}
+
+td > button {
+margin: 2px;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.estado-procesando {
+  color: #ff9800;
+  font-weight: bold;
+  margin-left: 8px;
+}
+
+.modal-grande {
+  width: 90%;
+  max-width: 600px; 
+  padding: 30px;
+}
+
+.modal-grande .modal-contenedor {
+  width: 100%;
+  padding: 0;
+}
+
+.modal-grande .tabla-accesos {
+  width: 100%;
+  min-width: 100%; 
+}
+
+.modal-grande .tabla-accesos {
+  display: block;
+  max-height: 65vh;
+  overflow-y: auto;
+}
+
+.modal-grande .tabla-accesos thead {
+  position: sticky;
+  top: 0;
+  background-color: #f4f4f4;
+  z-index: 10;
+}
+
+.dropdown-accesos {
+  min-width: 100px;
+  width: 22%; 
+  padding: 8px 12px;
+  font-size: 14px;
+  border-radius: 4px;
+  border: 1px solid #ddd;
+  background-color: white;
+  color: #333;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 16px;
+}
+
+.dropdown-accesos:hover {
+  border-color: #4a6fa5;
+}
+
+.dropdown-accesos:focus {
+  outline: none;
+  border-color: #4a6fa5;
+  box-shadow: 0 0 0 2px rgba(74, 111, 165, 0.2);
+}
+
+.dropdown-accesos option {
+  padding: 8px;
+  background: white;
+  color: #333;
+}
+
+.dropdown-accesos option[value=""] {
+  color: #999;
+  font-style: italic;
+}
+
+.dropdown-departamentos {
+  min-width: 200px;
+  padding: 8px 12px;
+  font-size: 14px;
+  border-radius: 4px;
+  border: 1px solid #ddd;
+  background-color: white;
+  color: #333;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 16px;
+}
+
+.dropdown-departamentos:hover {
+  border-color: #4a6fa5;
+}
+
+.dropdown-departamentos:focus {
+  outline: none;
+  border-color: #4a6fa5;
+  box-shadow: 0 0 0 2px rgba(74, 111, 165, 0.2);
+}
+
+.dropdown-departamentos option {
+  padding: 8px;
+  background: white;
+  color: #333;
+}
+
+.dropdown-departamentos option[value=""] {
+  color: #999;
+  font-style: italic;
+}
