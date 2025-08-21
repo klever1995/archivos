@@ -5,6 +5,8 @@ import socket
 import logging
 from collections import defaultdict
 import time
+import signal
+import threading
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -25,13 +27,22 @@ init_app(app)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
+# Control de ejecución global
+ejecucion_activa = threading.Event()
+ejecucion_activa.set()  # Iniciar como activo
+
+# Método de terminación
+def handler_shutdown(signum, frame):
+    ejecucion_activa.clear()
+    logger.info("Recibida señal de terminación, finalizando...")
+
 def procesar_archivo_remoto_continuo(ruta_archivo: str, id_servidor: int) -> bool:
     """
     Procesamiento continuo que espera 60 segundos cuando no encuentra logs
     """
-    ejecucion_activa = True
+    global ejecucion_activa
     
-    while ejecucion_activa:
+    while ejecucion_activa.is_set():  # Verificar si la ejecución está activa
         start_total = time.perf_counter()
         
         with app.app_context():
@@ -46,10 +57,14 @@ def procesar_archivo_remoto_continuo(ruta_archivo: str, id_servidor: int) -> boo
 
                 if not bloque:
                     logger.info("⏳ No se encontraron logs nuevos, esperando 60 segundos...")
-                    time.sleep(60)  # Espera fija de 1 minuto
+                    # Espera con verificación periódica
+                    for _ in range(60):
+                        if not ejecucion_activa.is_set():
+                            break
+                        time.sleep(1)
                     continue
 
-                # ... (todo el resto del procesamiento se mantiene igual)
+                # ... (resto del procesamiento)
                 id_auditoria = bloque['idAuditoria']
                 byte_inicio = bloque['byte_inicio']
                 byte_fin = bloque['byte_fin']
@@ -67,16 +82,28 @@ def procesar_archivo_remoto_continuo(ruta_archivo: str, id_servidor: int) -> boo
 
                 if total == 0:
                     logger.info("⏳ Bloque procesado con 0 logs, esperando 60 segundos...")
-                    time.sleep(60)  # También espera si el bloque tiene 0 logs
+                    for _ in range(60):
+                        if not ejecucion_activa.is_set():
+                            break
+                        time.sleep(1)
                 else:
                     logger.info(f"✅ Procesado bloque: {total} logs (Bytes: {byte_inicio}-{byte_fin})")
-                    time.sleep(1)  # Pequeña pausa entre bloques con logs
+                    # Pequeña pausa con verificación
+                    for _ in range(10):
+                        if not ejecucion_activa.is_set():
+                            break
+                        time.sleep(0.1)
 
             except Exception as e:
                 logger.error(f"Error en iteración: {str(e)}", exc_info=True)
-                time.sleep(10)  # Pausa más corta en caso de error
+                # Pausa más corta en caso de error con verificación
+                for _ in range(10):
+                    if not ejecucion_activa.is_set():
+                        break
+                    time.sleep(1)
                 continue
 
+    logger.info("🏁 Procesamiento continuo finalizado")
     return True
 
 def leer_chunk_local_para_pruebas(ruta: str, byte_inicio: int, byte_fin: int) -> str:
@@ -216,7 +243,13 @@ def procesar_servidor(servidor):
         return (servidor.nombreServidor, False)
 
 def main():
+    global ejecucion_activa
+    
     try:
+        # Configurar manejo de señales
+        signal.signal(signal.SIGINT, handler_shutdown)
+        signal.signal(signal.SIGTERM, handler_shutdown)
+        
         hostname_actual = socket.gethostname()
         print(f"🖥️ Hostname detectado: {hostname_actual}")
 
@@ -245,7 +278,7 @@ def main():
 
             # Pedir al usuario si quiere procesar todos o uno solo
             opcion = input("\n¿Deseas procesar todos los servidores? (s/n): ").strip().lower()
-            servidores_a_procesar = servidores
+            servidores_a_procesar = servidores  # ESTA LÍNEA DEBE ESTAR DENTRO DEL CONTEXTO
 
             if opcion == 'n':
                 seleccion = input("Ingresa el número del servidor a procesar: ").strip()
@@ -256,7 +289,25 @@ def main():
 
             # Procesamiento paralelo seguro
             with ThreadPoolExecutor(max_workers=min(4, len(servidores_a_procesar))) as executor:
-                resultados = list(executor.map(procesar_servidor, servidores_a_procesar))
+                futures = [executor.submit(procesar_servidor, servidor) for servidor in servidores_a_procesar]
+                
+                # Esperar a que todos los hilos terminen o se reciba señal
+                while ejecucion_activa.is_set() and any(not f.done() for f in futures):
+                    time.sleep(0.1)
+                
+                # Cancelar futuros si se recibió señal
+                if not ejecucion_activa.is_set():
+                    for future in futures:
+                        if not future.done():
+                            future.cancel()
+                
+                # Recopilar resultados
+                resultados = []
+                for future in futures:
+                    try:
+                        resultados.append(future.result())
+                    except:
+                        resultados.append((None, False))
                 
                 # Mostrar resumen
                 print("\n=== RESUMEN DE PROCESAMIENTO ===")
@@ -264,8 +315,9 @@ def main():
                 fallos = len(resultados) - exitos
                 
                 for nombre, resultado in resultados:
-                    estado = "✅ ÉXITO" if resultado else "❌ FALLÓ"
-                    print(f"{estado}: {nombre}")
+                    if nombre:
+                        estado = "✅ ÉXITO" if resultado else "❌ FALLÓ"
+                        print(f"{estado}: {nombre}")
                 
                 print(f"\nTotal: {exitos} exitos, {fallos} fallos")
 
@@ -273,6 +325,8 @@ def main():
         print(f"🔥 Error crítico: {str(e)}")
         import traceback
         traceback.print_exc()
-
+    finally:
+        ejecucion_activa.clear()
+        
 if __name__ == "__main__":
     main()
