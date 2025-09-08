@@ -1,0 +1,6 @@
+DB_USER=administrador
+DB_PASSWORD=Mupi2024+11
+DB_HOST=asistentebase.mysql.database.azure.com
+DB_PORT=3306
+DB_NAME=asistentedb
+AZURE_OPENAI_API_KEY=pon aqui la api key
