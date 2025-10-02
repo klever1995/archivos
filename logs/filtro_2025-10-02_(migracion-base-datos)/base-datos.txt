@@ -1,0 +1,181 @@
+-- asistentedb.as_empresa definition
+
+CREATE TABLE `as_empresa` (
+  `idEmpresa` int NOT NULL AUTO_INCREMENT,
+  `nombre` varchar(500) DEFAULT NULL,
+  `nombreIndice` varchar(20) DEFAULT NULL,
+  `estado` varchar(20) DEFAULT NULL,
+  `fecha_creacion` date DEFAULT NULL,
+  `idEmpresaGen` varchar(200) DEFAULT NULL,
+  `codigo` varchar(200) DEFAULT NULL,
+  PRIMARY KEY (`idEmpresa`)
+) ENGINE=InnoDB AUTO_INCREMENT=7 DEFAULT CHARSET=utf8mb3;
+
+
+-- asistentedb.lo_errorconocido definition
+
+CREATE TABLE `lo_errorconocido` (
+  `iderrorconocido` int NOT NULL AUTO_INCREMENT,
+  `hasherror` varchar(64) NOT NULL COMMENT 'SHA-256 del mensaje normalizado',
+  `mensajenormalizado` text NOT NULL COMMENT 'Error limpio (sin variables)',
+  `nivel` varchar(10) NOT NULL COMMENT 'ERROR, WARN, etc.',
+  `respuestaopenai` text COMMENT 'Solución de IA',
+  `fechaprimeraocurrencia` datetime DEFAULT CURRENT_TIMESTAMP,
+  `fechaultimaactualizacion` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`iderrorconocido`),
+  UNIQUE KEY `hasherror_unico` (`hasherror`,`nivel`) COMMENT 'Evita duplicados'
+) ENGINE=InnoDB AUTO_INCREMENT=748 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- asistentedb.lo_accesosremotos definition
+
+CREATE TABLE `lo_accesosremotos` (
+  `idAcceso` int NOT NULL AUTO_INCREMENT,
+  `idEmpresa` int NOT NULL,
+  `usuario` varchar(100) NOT NULL,
+  `contrasena` varchar(255) NOT NULL,
+  `activo` tinyint(1) DEFAULT '1',
+  `fechaRegistro` datetime DEFAULT CURRENT_TIMESTAMP,
+  `hostname` varchar(255) NOT NULL COMMENT 'Nombre único del servidor remoto',
+  PRIMARY KEY (`idAcceso`),
+  UNIQUE KEY `uk_hostname` (`hostname`),
+  KEY `fk_accesoremoto_empresa` (`idEmpresa`),
+  CONSTRAINT `fk_accesoremoto_empresa` FOREIGN KEY (`idEmpresa`) REFERENCES `as_empresa` (`idEmpresa`)
+) ENGINE=InnoDB AUTO_INCREMENT=13 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- asistentedb.lo_departamentos definition
+
+CREATE TABLE `lo_departamentos` (
+  `idDepartamento` int NOT NULL AUTO_INCREMENT,
+  `idEmpresa` int NOT NULL COMMENT 'Empresa dueña del departamento',
+  `nombre` varchar(100) NOT NULL COMMENT 'Ej: TI, Finanzas, Logística',
+  `fechaRegistro` datetime DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`idDepartamento`),
+  UNIQUE KEY `uk_nombre_empresa` (`nombre`,`idEmpresa`) COMMENT 'No puede repetirse nombre en misma empresa',
+  KEY `fk_departamento_empresa` (`idEmpresa`),
+  CONSTRAINT `fk_departamento_empresa` FOREIGN KEY (`idEmpresa`) REFERENCES `as_empresa` (`idEmpresa`)
+) ENGINE=InnoDB AUTO_INCREMENT=16 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='Departamentos para agrupar servidores';
+
+
+-- asistentedb.lo_servidores definition
+
+CREATE TABLE `lo_servidores` (
+  `idServidor` int NOT NULL AUTO_INCREMENT,
+  `idEmpresa` int NOT NULL,
+  `ruta` varchar(500) NOT NULL COMMENT 'Ruta absoluta del archivo de log',
+  `nombreServidor` varchar(100) NOT NULL COMMENT 'Ej: ServidorWeb01',
+  `activo` tinyint(1) DEFAULT '0',
+  `fechaRegistro` datetime DEFAULT CURRENT_TIMESTAMP,
+  `idAccesoRemoto` int DEFAULT NULL COMMENT 'FK a lo_accesosremotos',
+  `idDepartamento` int DEFAULT NULL COMMENT 'FK a lo_departamentos',
+  PRIMARY KEY (`idServidor`),
+  UNIQUE KEY `ruta_unica` (`ruta`),
+  KEY `idEmpresa` (`idEmpresa`),
+  KEY `fk_servidor_acceso_remoto` (`idAccesoRemoto`),
+  KEY `fk_servidor_departamento` (`idDepartamento`),
+  CONSTRAINT `fk_servidor_acceso_remoto` FOREIGN KEY (`idAccesoRemoto`) REFERENCES `lo_accesosremotos` (`idAcceso`),
+  CONSTRAINT `fk_servidor_departamento` FOREIGN KEY (`idDepartamento`) REFERENCES `lo_departamentos` (`idDepartamento`),
+  CONSTRAINT `lo_servidores_ibfk_1` FOREIGN KEY (`idEmpresa`) REFERENCES `as_empresa` (`idEmpresa`)
+) ENGINE=InnoDB AUTO_INCREMENT=152 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- asistentedb.lo_procesos definition
+
+CREATE TABLE `lo_procesos` (
+  `idAuditoria` int NOT NULL AUTO_INCREMENT,
+  `idEmpresa` int NOT NULL,
+  `idServidor` int DEFAULT NULL,
+  `operador` int NOT NULL,
+  `fechaInicio` datetime NOT NULL,
+  `fechaFin` datetime DEFAULT NULL,
+  `duracionSegundos` float GENERATED ALWAYS AS (timestampdiff(SECOND,`fechaInicio`,`fechaFin`)) STORED,
+  `totalLogsProcesados` int DEFAULT '0',
+  `byte_inicio` bigint DEFAULT '0',
+  `byte_fin` bigint DEFAULT NULL,
+  `ultimo_byte_procesado` bigint DEFAULT NULL,
+  `archivo` varchar(255) DEFAULT NULL COMMENT 'Ruta absoluta del archivo de log',
+  `checksum` varchar(64) DEFAULT NULL COMMENT 'SHA-256 del archivo para detectar cambios',
+  `bloque_size` int DEFAULT '1048576' COMMENT 'Tamaño del chunk en bytes (1MB por defecto)',
+  `estado` varchar(20) DEFAULT NULL,
+  `procesoActivo` tinyint(1) DEFAULT '0' COMMENT 'Indica si el proceso debe ejecutarse periódicamente',
+  `intervaloMinutos` int DEFAULT '5' COMMENT 'Frecuencia de ejecución en minutos',
+  PRIMARY KEY (`idAuditoria`),
+  KEY `idEmpresa` (`idEmpresa`),
+  KEY `fk_procesos_servidor` (`idServidor`),
+  CONSTRAINT `fk_procesos_servidor` FOREIGN KEY (`idServidor`) REFERENCES `lo_servidores` (`idServidor`),
+  CONSTRAINT `lo_procesos_ibfk_1` FOREIGN KEY (`idEmpresa`) REFERENCES `as_empresa` (`idEmpresa`)
+) ENGINE=InnoDB AUTO_INCREMENT=1585 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- asistentedb.lo_interpretacionremota definition
+
+CREATE TABLE `lo_interpretacionremota` (
+  `idInterpretacion` int NOT NULL AUTO_INCREMENT,
+  `idProcesoFiltrado` int NOT NULL COMMENT 'FK a lo_procesos.idAuditoria (solo procesos con tipoProceso=FILTRADOREMOTO)',
+  `idServidor` int NOT NULL,
+  `fechaInicio` datetime NOT NULL,
+  `fechaFin` datetime DEFAULT NULL,
+  `duracionSegundos` float GENERATED ALWAYS AS (timestampdiff(SECOND,`fechaInicio`,`fechaFin`)) STORED,
+  `ultimoLogProcesado` int DEFAULT '0' COMMENT 'ID del último registro procesado en lo_logsremotos',
+  `totalLogsInterpretados` int DEFAULT '0',
+  `estado` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`idInterpretacion`),
+  KEY `idProcesoFiltrado` (`idProcesoFiltrado`),
+  KEY `idServidor` (`idServidor`),
+  CONSTRAINT `lo_interpretacionremota_ibfk_1` FOREIGN KEY (`idProcesoFiltrado`) REFERENCES `lo_procesos` (`idAuditoria`),
+  CONSTRAINT `lo_interpretacionremota_ibfk_2` FOREIGN KEY (`idServidor`) REFERENCES `lo_servidores` (`idServidor`)
+) ENGINE=InnoDB AUTO_INCREMENT=494 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- asistentedb.lo_logs definition
+
+CREATE TABLE `lo_logs` (
+  `idLogAplicacion` int NOT NULL AUTO_INCREMENT,
+  `idEmpresa` int NOT NULL,
+  `idServidor` int DEFAULT NULL,
+  `idAuditoria` int DEFAULT NULL,
+  `operador` int NOT NULL,
+  `fechaCreacion` datetime NOT NULL,
+  `estado` varchar(20) DEFAULT 'ACTIVO',
+  `nivel` varchar(10) NOT NULL,
+  `componente` varchar(255) DEFAULT NULL,
+  `hilo` varchar(200) DEFAULT NULL,
+  `mensaje` text,
+  `categoria` varchar(100) DEFAULT NULL,
+  `ocurrencias` int DEFAULT '1',
+  `respuestaOpenai` text,
+  `lineas` json DEFAULT NULL,
+  PRIMARY KEY (`idLogAplicacion`),
+  KEY `idEmpresa` (`idEmpresa`),
+  KEY `fk_logs_servidor` (`idServidor`),
+  KEY `fk_logs_auditoria` (`idAuditoria`),
+  CONSTRAINT `fk_logs_auditoria` FOREIGN KEY (`idAuditoria`) REFERENCES `lo_procesos` (`idAuditoria`),
+  CONSTRAINT `fk_logs_servidor` FOREIGN KEY (`idServidor`) REFERENCES `lo_servidores` (`idServidor`),
+  CONSTRAINT `lo_logs_ibfk_1` FOREIGN KEY (`idEmpresa`) REFERENCES `as_empresa` (`idEmpresa`)
+) ENGINE=InnoDB AUTO_INCREMENT=12490 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- asistentedb.lo_logsremotos definition
+
+CREATE TABLE `lo_logsremotos` (
+  `idLogRemoto` int NOT NULL AUTO_INCREMENT,
+  `idEmpresa` int NOT NULL,
+  `idServidor` int NOT NULL,
+  `idAuditoria` int NOT NULL,
+  `fechaCreacion` datetime NOT NULL,
+  `nivel` varchar(10) NOT NULL,
+  `mensaje` text,
+  `categoria` varchar(100) DEFAULT NULL,
+  `ocurrencias` int DEFAULT '1',
+  `componente` varchar(255) DEFAULT NULL,
+  `hilo` varchar(200) DEFAULT NULL,
+  `lineas` json DEFAULT NULL,
+  PRIMARY KEY (`idLogRemoto`),
+  KEY `fk_logsremotos_servidor` (`idServidor`),
+  KEY `fk_logsremotos_auditoria` (`idAuditoria`),
+  KEY `fk_logsremotos_empresa` (`idEmpresa`),
+  CONSTRAINT `fk_logsremotos_auditoria` FOREIGN KEY (`idAuditoria`) REFERENCES `lo_procesos` (`idAuditoria`),
+  CONSTRAINT `fk_logsremotos_empresa` FOREIGN KEY (`idEmpresa`) REFERENCES `as_empresa` (`idEmpresa`),
+  CONSTRAINT `fk_logsremotos_servidor` FOREIGN KEY (`idServidor`) REFERENCES `lo_servidores` (`idServidor`)
+) ENGINE=InnoDB AUTO_INCREMENT=9458 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
