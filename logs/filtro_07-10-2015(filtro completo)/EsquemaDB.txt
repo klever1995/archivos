@@ -1,0 +1,204 @@
+-- NovaCoreIA.dbo.as_empresa definition
+
+-- Drop table
+
+-- DROP TABLE NovaCoreIA.dbo.as_empresa;
+
+CREATE TABLE NovaCoreIA.dbo.as_empresa (
+	idEmpresa int IDENTITY(1,1) NOT NULL,
+	nombre varchar(500) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	nombreIndice varchar(20) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	estado varchar(20) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	fecha_creacion date NULL,
+	idEmpresaGen varchar(200) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	codigo varchar(200) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	CONSTRAINT PK__as_empre__75D2CED410E72AE4 PRIMARY KEY (idEmpresa)
+);
+
+
+-- NovaCoreIA.dbo.lo_errorconocido definition
+
+-- Drop table
+
+-- DROP TABLE NovaCoreIA.dbo.lo_errorconocido;
+
+CREATE TABLE NovaCoreIA.dbo.lo_errorconocido (
+	iderrorconocido int IDENTITY(1,1) NOT NULL,
+	hasherror varchar(64) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
+	mensajenormalizado text COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
+	nivel varchar(10) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
+	respuestaopenai text COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	nivelError varchar(10) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	fechaprimeraocurrencia datetime DEFAULT getdate() NULL,
+	fechaultimaactualizacion datetime DEFAULT getdate() NULL,
+	CONSTRAINT PK__lo_error__2B3C5D3AE8CA4837 PRIMARY KEY (iderrorconocido),
+	CONSTRAINT UK_hasherror_unico UNIQUE (hasherror,nivel)
+);
+
+
+-- NovaCoreIA.dbo.lo_accesosremotos definition
+
+-- Drop table
+
+-- DROP TABLE NovaCoreIA.dbo.lo_accesosremotos;
+
+CREATE TABLE NovaCoreIA.dbo.lo_accesosremotos (
+	idAcceso int IDENTITY(1,1) NOT NULL,
+	idEmpresa int NOT NULL,
+	usuario varchar(100) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
+	contrasena varchar(255) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
+	activo bit DEFAULT 1 NULL,
+	fechaRegistro datetime DEFAULT getdate() NULL,
+	hostname varchar(255) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
+	CONSTRAINT PK__lo_acces__FF937662D3B36B0B PRIMARY KEY (idAcceso),
+	CONSTRAINT UK_hostname UNIQUE (hostname),
+	CONSTRAINT FK_accesoremoto_empresa FOREIGN KEY (idEmpresa) REFERENCES NovaCoreIA.dbo.as_empresa(idEmpresa)
+);
+
+
+-- NovaCoreIA.dbo.lo_departamentos definition
+
+-- Drop table
+
+-- DROP TABLE NovaCoreIA.dbo.lo_departamentos;
+
+CREATE TABLE NovaCoreIA.dbo.lo_departamentos (
+	idDepartamento int IDENTITY(1,1) NOT NULL,
+	idEmpresa int NOT NULL,
+	nombre varchar(100) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
+	fechaRegistro datetime DEFAULT getdate() NULL,
+	CONSTRAINT PK__lo_depar__C225F98D383D348D PRIMARY KEY (idDepartamento),
+	CONSTRAINT UK_nombre_empresa UNIQUE (nombre,idEmpresa),
+	CONSTRAINT FK_departamento_empresa FOREIGN KEY (idEmpresa) REFERENCES NovaCoreIA.dbo.as_empresa(idEmpresa)
+);
+
+
+-- NovaCoreIA.dbo.lo_servidores definition
+
+-- Drop table
+
+-- DROP TABLE NovaCoreIA.dbo.lo_servidores;
+
+CREATE TABLE NovaCoreIA.dbo.lo_servidores (
+	idServidor int IDENTITY(1,1) NOT NULL,
+	idEmpresa int NOT NULL,
+	ruta varchar(500) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
+	nombreServidor varchar(100) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
+	activo bit DEFAULT 0 NULL,
+	fechaRegistro datetime DEFAULT getdate() NULL,
+	idAccesoRemoto int NULL,
+	idDepartamento int NULL,
+	CONSTRAINT PK__lo_servi__CE78AFEBBECBF902 PRIMARY KEY (idServidor),
+	CONSTRAINT UK_ruta UNIQUE (ruta),
+	CONSTRAINT FK_servidor_acceso_remoto FOREIGN KEY (idAccesoRemoto) REFERENCES NovaCoreIA.dbo.lo_accesosremotos(idAcceso),
+	CONSTRAINT FK_servidor_departamento FOREIGN KEY (idDepartamento) REFERENCES NovaCoreIA.dbo.lo_departamentos(idDepartamento),
+	CONSTRAINT FK_servidores_empresa FOREIGN KEY (idEmpresa) REFERENCES NovaCoreIA.dbo.as_empresa(idEmpresa)
+);
+
+
+-- NovaCoreIA.dbo.lo_procesos definition
+
+-- Drop table
+
+-- DROP TABLE NovaCoreIA.dbo.lo_procesos;
+
+CREATE TABLE NovaCoreIA.dbo.lo_procesos (
+	idAuditoria int IDENTITY(1,1) NOT NULL,
+	idEmpresa int NOT NULL,
+	idServidor int NULL,
+	operador int NOT NULL,
+	fechaInicio datetime NOT NULL,
+	fechaFin datetime NULL,
+	duracionSegundos AS (datediff(second,[fechaInicio],[fechaFin])),
+	totalLogsProcesados int DEFAULT 0 NULL,
+	byte_inicio bigint DEFAULT 0 NULL,
+	byte_fin bigint NULL,
+	ultimo_byte_procesado bigint NULL,
+	archivo varchar(255) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	checksum varchar(64) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	bloque_size int DEFAULT 1048576 NULL,
+	estado varchar(20) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	procesoActivo bit DEFAULT 0 NULL,
+	intervaloMinutos int DEFAULT 5 NULL,
+	CONSTRAINT PK__lo_proce__F1F3070134DE0427 PRIMARY KEY (idAuditoria),
+	CONSTRAINT FK_procesos_empresa FOREIGN KEY (idEmpresa) REFERENCES NovaCoreIA.dbo.as_empresa(idEmpresa),
+	CONSTRAINT FK_procesos_servidor FOREIGN KEY (idServidor) REFERENCES NovaCoreIA.dbo.lo_servidores(idServidor)
+);
+
+
+-- NovaCoreIA.dbo.lo_interpretacionremota definition
+
+-- Drop table
+
+-- DROP TABLE NovaCoreIA.dbo.lo_interpretacionremota;
+
+CREATE TABLE NovaCoreIA.dbo.lo_interpretacionremota (
+	idInterpretacion int IDENTITY(1,1) NOT NULL,
+	idProcesoFiltrado int NOT NULL,
+	idServidor int NOT NULL,
+	fechaInicio datetime NOT NULL,
+	fechaFin datetime NULL,
+	duracionSegundos AS (datediff(second,[fechaInicio],[fechaFin])),
+	ultimoLogProcesado int DEFAULT 0 NULL,
+	totalLogsInterpretados int DEFAULT 0 NULL,
+	estado varchar(20) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	CONSTRAINT PK__lo_inter__E560BCD5A645B9B8 PRIMARY KEY (idInterpretacion),
+	CONSTRAINT FK_interpretacion_proceso FOREIGN KEY (idProcesoFiltrado) REFERENCES NovaCoreIA.dbo.lo_procesos(idAuditoria),
+	CONSTRAINT FK_interpretacion_servidor FOREIGN KEY (idServidor) REFERENCES NovaCoreIA.dbo.lo_servidores(idServidor)
+);
+
+
+-- NovaCoreIA.dbo.lo_logs definition
+
+-- Drop table
+
+-- DROP TABLE NovaCoreIA.dbo.lo_logs;
+
+CREATE TABLE NovaCoreIA.dbo.lo_logs (
+	idLogAplicacion int IDENTITY(1,1) NOT NULL,
+	idEmpresa int NOT NULL,
+	idServidor int NULL,
+	idAuditoria int NULL,
+	operador int NOT NULL,
+	fechaCreacion datetime NOT NULL,
+	estado varchar(20) COLLATE SQL_Latin1_General_CP1_CI_AS DEFAULT 'ACTIVO' NULL,
+	nivel varchar(10) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
+	componente varchar(255) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	hilo varchar(200) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	mensaje text COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	categoria varchar(100) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	ocurrencias int DEFAULT 1 NULL,
+	respuestaOpenai text COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	nivelError varchar(10) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	lineas nvarchar(MAX) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	CONSTRAINT PK__lo_logs__8CAB5C98C67DC2BD PRIMARY KEY (idLogAplicacion),
+	CONSTRAINT FK_logs_auditoria FOREIGN KEY (idAuditoria) REFERENCES NovaCoreIA.dbo.lo_procesos(idAuditoria),
+	CONSTRAINT FK_logs_empresa FOREIGN KEY (idEmpresa) REFERENCES NovaCoreIA.dbo.as_empresa(idEmpresa),
+	CONSTRAINT FK_logs_servidor FOREIGN KEY (idServidor) REFERENCES NovaCoreIA.dbo.lo_servidores(idServidor)
+);
+
+
+-- NovaCoreIA.dbo.lo_logsremotos definition
+
+-- Drop table
+
+-- DROP TABLE NovaCoreIA.dbo.lo_logsremotos;
+
+CREATE TABLE NovaCoreIA.dbo.lo_logsremotos (
+	idLogRemoto int IDENTITY(1,1) NOT NULL,
+	idEmpresa int NOT NULL,
+	idServidor int NOT NULL,
+	idAuditoria int NOT NULL,
+	fechaCreacion datetime NOT NULL,
+	nivel varchar(10) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
+	mensaje text COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	categoria varchar(100) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	ocurrencias int DEFAULT 1 NULL,
+	componente varchar(255) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	hilo varchar(200) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	lineas nvarchar(MAX) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	CONSTRAINT PK__lo_logsr__A283FF7AEDCA1A9A PRIMARY KEY (idLogRemoto),
+	CONSTRAINT FK_logsremotos_auditoria FOREIGN KEY (idAuditoria) REFERENCES NovaCoreIA.dbo.lo_procesos(idAuditoria),
+	CONSTRAINT FK_logsremotos_empresa FOREIGN KEY (idEmpresa) REFERENCES NovaCoreIA.dbo.as_empresa(idEmpresa),
+	CONSTRAINT FK_logsremotos_servidor FOREIGN KEY (idServidor) REFERENCES NovaCoreIA.dbo.lo_servidores(idServidor)
+);
